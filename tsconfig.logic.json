@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2020", "lib": ["esnext"], "strict": true, "noEmit": true,
+    "module": "esnext", "moduleResolution": "bundler", "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/types", "src/lib/utils", "src/lib/parser", "src/lib/matching", "src/lib/ai", "tests"]
+}
