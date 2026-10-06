@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { repositories } from '@/lib/repositories';
 import { useQuery } from '@/lib/repositories/hooks';
 import { matchesQuery } from '@/lib/utils/search';
-import { formatNumberFa } from '@/lib/utils/persian';
+import { formatNumberFa, toPersianDigits } from '@/lib/utils/persian';
 import { Badge, Button, Card, EmptyState, Input, ListSkeleton, PageHeader } from '@/components/ui';
 import { PlusIcon } from '@/components/icons';
 
@@ -30,7 +30,7 @@ export default function ClientsPage() {
                     <h3 className="truncate font-semibold">{c.name}</h3>
                     <span className="shrink-0 text-xs text-slate-500">{formatNumberFa(needCount(c.id))} نیاز</span>
                   </div>
-                  {c.phone && <p className="mt-0.5 text-sm text-slate-500" dir="ltr" style={{ textAlign: 'right' }}>{formatNumberFa(c.phone)}</p>}
+                  {c.phone && <p className="mt-0.5 text-sm text-slate-500" dir="ltr" style={{ textAlign: 'right' }}>{toPersianDigits(c.phone)}</p>}
                   {c.tags.length > 0 && <div className="mt-2 flex flex-wrap gap-1.5">{c.tags.map((t) => <Badge key={t}>{t}</Badge>)}</div>}
                 </Card>
               </Link>
