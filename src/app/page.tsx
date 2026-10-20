@@ -6,6 +6,7 @@ import { useQuery } from '@/lib/repositories/hooks';
 import { suggestTopMatches } from '@/lib/matching';
 import { formatJalaliLong, relativeDayLabel, timeAgo, todayISO } from '@/lib/utils/date';
 import { formatNumberFa, toPersianDigits } from '@/lib/utils/persian';
+import { AuthGate } from '@/components/AuthGate';
 import { Badge, Button, Card, EmptyState, ListSkeleton, PageHeader, Section } from '@/components/ui';
 import { PlusIcon, SparkleIcon } from '@/components/icons';
 
@@ -18,7 +19,7 @@ function Stat({ href, label, value }: { href: string; label: string; value: numb
   );
 }
 
-export default function Dashboard() {
+function DashboardContent() {
   const properties = useQuery(() => repositories.properties.list());
   const clients = useQuery(() => repositories.clients.list());
   const needs = useQuery(() => repositories.needs.list());
@@ -30,12 +31,12 @@ export default function Dashboard() {
   const due = useMemo(() => (followUps ?? []).filter((f) => f.status === 'pending' && f.dueDate <= today).sort((a, b) => a.dueDate.localeCompare(b.dueDate)), [followUps, today]);
   const dueToday = due.filter((f) => f.dueDate === today).length;
 
-  if (!properties || !clients || !needs || !followUps || !acts) return <><PageHeader title="رهیار" /><ListSkeleton rows={4} /></>;
+  if (!properties || !clients || !needs || !followUps || !acts) return <><PageHeader title="اتحاد" /><ListSkeleton rows={4} /></>;
   const clientName = (id: string) => clients.find((c) => c.id === id)?.name ?? 'مشتری';
 
   return (
     <>
-      <PageHeader title="رهیار" subtitle={formatJalaliLong(new Date())} />
+      <PageHeader title="اتحاد" subtitle={formatJalaliLong(new Date())} />
       <div className="space-y-2 px-4">
         <Button href="/properties/new/?mode=smart" className="w-full"><SparkleIcon width={18} height={18} /> ثبت هوشمند فایل</Button>
         <div className="grid grid-cols-2 gap-2">
@@ -78,5 +79,13 @@ export default function Dashboard() {
             <div key={a.id} className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm"><span className="min-w-0 truncate">{a.text}</span><span className="shrink-0 text-xs text-slate-400">{timeAgo(a.createdAt)}</span></div>))}</Card>}
       </Section>
     </>
+  );
+}
+
+export default function Dashboard() {
+  return (
+    <AuthGate requireOrganization>
+      <DashboardContent />
+    </AuthGate>
   );
 }
