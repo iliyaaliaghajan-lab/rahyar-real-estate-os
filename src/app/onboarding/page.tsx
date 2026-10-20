@@ -1,30 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { AuthGate } from '@/components/AuthGate';
 import { Button, Card, Callout, Field, Input, PageHeader } from '@/components/ui';
 
-export default function OnboardingPage() {
+function OnboardingForm() {
   const router = useRouter();
   const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
-  const [checking, setChecking] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Simple auth check on mount
-  useEffect(() => {
-    const check = async () => {
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        router.replace('/login');
-        return;
-      }
-      setChecking(false);
-    };
-    check();
-  }, [router]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -76,15 +62,6 @@ export default function OnboardingPage() {
     router.replace('/');
   }
 
-  if (checking) {
-    return (
-      <>
-        <PageHeader title="راه‌اندازی مجموعه" />
-        <div className="px-4 py-8 text-center text-sm text-slate-500">در حال بررسی...</div>
-      </>
-    );
-  }
-
   return (
     <>
       <PageHeader
@@ -110,9 +87,7 @@ export default function OnboardingPage() {
               />
             </Field>
 
-            {error && (
-              <Callout tone="error">{error}</Callout>
-            )}
+            {error && <Callout tone="error">{error}</Callout>}
 
             <Button type="submit" className="w-full" disabled={loading || !name.trim()}>
               {loading ? 'در حال ایجاد...' : 'ایجاد مجموعه و ادامه'}
@@ -121,5 +96,13 @@ export default function OnboardingPage() {
         </Card>
       </div>
     </>
+  );
+}
+
+export default function OnboardingPage() {
+  return (
+    <AuthGate requireAuth>
+      <OnboardingForm />
+    </AuthGate>
   );
 }
