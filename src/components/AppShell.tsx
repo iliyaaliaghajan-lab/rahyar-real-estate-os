@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import { BellIcon, BuildingIcon, HomeIcon, MoreIcon, SparkleIcon, UsersIcon } from './icons';
 import { SeedGate } from './SeedGate';
 import { ServiceWorkerRegister } from './ServiceWorkerRegister';
+import { UserBar } from './UserBar';
 import { cn } from './ui';
 
 const NAV = [
@@ -19,9 +20,14 @@ const NAV = [
 export function AppShell({ children }: { children: ReactNode }) {
   const path = usePathname() ?? '/';
   const isActive = (href: string) => (href === '/' ? path === '/' : path.startsWith(href.replace(/\/$/, '')));
+
+  // Hide the status bar on auth-related pages for a cleaner experience
+  const hideUserBar = path.startsWith('/login') || path.startsWith('/auth') || path.startsWith('/onboarding');
+
   return (
     <div className="mx-auto min-h-dvh max-w-3xl pb-28">
       <ServiceWorkerRegister />
+      {!hideUserBar && <UserBar />}
       <SeedGate>{children}</SeedGate>
       <nav
         aria-label="ناوبری اصلی"
