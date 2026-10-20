@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { clearAllData, exportAllData, resetToDemoData } from '@/lib/db/maintenance';
 import { Button, Callout, Card, PageHeader, Section } from '@/components/ui';
-import { SearchIcon } from '@/components/icons';
+import { SearchIcon, UsersIcon } from '@/components/icons';
 
 export default function MorePage() {
   const [msg, setMsg] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
@@ -24,10 +24,26 @@ export default function MorePage() {
   return (
     <>
       <PageHeader title="بیشتر" />
+
       <Section>
-        <Link href="/search/" className="block"><Card className="flex items-center gap-3 p-4 hover:border-brand-200"><SearchIcon /><span className="font-medium">جستجو در فایل‌ها و مشتریان</span></Card></Link>
+        <div className="space-y-2">
+          <Link href="/team/" className="block">
+            <Card className="flex items-center gap-3 p-4 hover:border-brand-200">
+              <UsersIcon />
+              <span className="font-medium">تیم و اعضا</span>
+            </Card>
+          </Link>
+          <Link href="/search/" className="block">
+            <Card className="flex items-center gap-3 p-4 hover:border-brand-200">
+              <SearchIcon />
+              <span className="font-medium">جستجو در فایل‌ها و مشتریان</span>
+            </Card>
+          </Link>
+        </div>
       </Section>
+
       {msg && <div className="px-4"><Callout tone={msg.tone}>{msg.text}</Callout></div>}
+
       <Section title="داده‌ها">
         <Card className="space-y-3 p-4">
           <p className="text-sm leading-7 text-slate-600">همه اطلاعات فقط روی همین دستگاه (در مرورگر) ذخیره می‌شود و بدون اینترنت هم کار می‌کند. پاک کردن داده‌های مرورگر، اطلاعات را حذف می‌کند؛ پس نسخه پشتیبان بگیرید.</p>
@@ -36,10 +52,11 @@ export default function MorePage() {
           <Button variant="danger" className="w-full" onClick={() => { if (window.confirm('همه فایل‌ها، مشتریان، نیازها و پیگیری‌ها برای همیشه حذف شود؟')) run(clearAllData, 'همه داده‌ها حذف شد.'); }}>حذف همه داده‌ها</Button>
         </Card>
       </Section>
+
       <Section title="درباره">
         <Card className="space-y-1 p-4 text-sm text-slate-600">
-          <p>رهیار — نسخه MVP ۰٫۱</p>
-          <p>تحلیل متن و تطبیق، قانون‌محور و محلی است؛ هیچ داده‌ای به سرور یا سرویس هوش مصنوعی ارسال نمی‌شود.</p>
+          <p>اتحاد — نسخه در حال توسعه (چندکاربره)</p>
+          <p>تحلیل متن و تطبیق در نسخه فعلی قانون‌محور و محلی است.</p>
         </Card>
       </Section>
     </>
