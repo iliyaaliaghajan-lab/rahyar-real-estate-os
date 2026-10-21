@@ -109,12 +109,51 @@ do $$ begin
   end if;
 end $$;
 
--- Helpful indexes
-create index if not exists idx_properties_org on public.properties(organization_id);
-create index if not exists idx_clients_org on public.clients(organization_id);
-create index if not exists idx_needs_org on public.needs(organization_id);
-create index if not exists idx_follow_ups_org on public.follow_ups(organization_id);
-create index if not exists idx_activities_org on public.activities(organization_id);
+-- Helpful indexes (only when table + organization_id column exist)
+do $$ begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'properties' and column_name = 'organization_id'
+  ) then
+    create index if not exists idx_properties_org on public.properties(organization_id);
+  end if;
+end $$;
+
+do $$ begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'clients' and column_name = 'organization_id'
+  ) then
+    create index if not exists idx_clients_org on public.clients(organization_id);
+  end if;
+end $$;
+
+do $$ begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'needs' and column_name = 'organization_id'
+  ) then
+    create index if not exists idx_needs_org on public.needs(organization_id);
+  end if;
+end $$;
+
+do $$ begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'follow_ups' and column_name = 'organization_id'
+  ) then
+    create index if not exists idx_follow_ups_org on public.follow_ups(organization_id);
+  end if;
+end $$;
+
+do $$ begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'activities' and column_name = 'organization_id'
+  ) then
+    create index if not exists idx_activities_org on public.activities(organization_id);
+  end if;
+end $$;
 
 -- ------------------------------------------------------------
 -- 5. Enable Row Level Security
