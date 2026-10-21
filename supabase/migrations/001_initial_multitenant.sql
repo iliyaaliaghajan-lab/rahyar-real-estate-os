@@ -1,14 +1,13 @@
 -- ============================================================
 -- 001_initial_multitenant.sql
--- اتحاد / رهیار — Multi-tenant foundation
+-- اتحاد / رهیار — Multi-tenant foundation (security-hardened)
 -- ============================================================
--- This migration creates the core multi-tenant structure.
--- It does NOT migrate any existing local (IndexedDB) data.
--- Run this in the Supabase SQL Editor or via the CLI after review.
+-- Creates core multi-tenant structure. Does NOT migrate IndexedDB data.
+-- Business tables are NOT created here; only altered if they already exist.
 -- ============================================================
 
 -- ------------------------------------------------------------
--- 1. Organizations (آژانس / مجموعه)
+-- 1. Organizations
 -- ------------------------------------------------------------
 create table if not exists public.organizations (
   id uuid primary key default gen_random_uuid(),
@@ -21,7 +20,7 @@ create table if not exists public.organizations (
 comment on table public.organizations is 'Real-estate agencies / teams (tenant root)';
 
 -- ------------------------------------------------------------
--- 2. Profiles (extends auth.users)
+-- 2. Profiles
 -- ------------------------------------------------------------
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
@@ -34,11 +33,23 @@ create table if not exists public.profiles (
 comment on table public.profiles is 'Public profile data linked 1:1 with auth.users';
 
 -- ------------------------------------------------------------
--- 3. Organization Members (membership + role)
+-- 3. Enums (safe on re-run)
 -- ------------------------------------------------------------
-create type public.member_role as enum ('owner', 'admin', 'agent');
-create type public.member_status as enum ('active', 'invited', 'disabled');
+do $$ begin
+  create type public.member_role as enum ('owner', 'admin', 'agent');
+exception
+  when duplicate_object then null;
+end $$;
 
+do $$ begin
+  create type public.member_status as enum ('active', 'invited', 'disabled');
+exception
+  when duplicate_object then null;
+end $$;
+
+-- ------------------------------------------------------------
+-- 4. Organization members
+-- ------------------------------------------------------------
 create table if not exists public.organization_members (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations(id) on delete cascade,
@@ -59,9 +70,8 @@ create index if not exists idx_org_members_org on public.organization_members(or
 comment on table public.organization_members is 'Links users to organizations with role and status';
 
 -- ------------------------------------------------------------
--- 4. Add organization_id to core business tables (only if table exists)
+-- 5. organization_id on business tables (only if table exists)
 -- ------------------------------------------------------------
-
 do $$ begin
   if exists (
     select 1 from information_schema.tables
@@ -122,7 +132,7 @@ do $$ begin
   end if;
 end $$;
 
--- Helpful indexes (only when table + organization_id column exist)
+-- Indexes only when table + column exist
 do $$ begin
   if exists (
     select 1 from information_schema.columns
@@ -169,13 +179,12 @@ do $$ begin
 end $$;
 
 -- ------------------------------------------------------------
--- 5. Enable Row Level Security
+-- 6. Enable RLS
 -- ------------------------------------------------------------
 alter table public.organizations enable row level security;
 alter table public.profiles enable row level security;
 alter table public.organization_members enable row level security;
 
--- Business tables (only if they exist)
 do $$ begin
   if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'properties') then
     alter table public.properties enable row level security;
@@ -195,78 +204,133 @@ do $$ begin
 end $$;
 
 -- ------------------------------------------------------------
--- 6. Basic RLS Policies (Phase 1 — conservative)
--- ------------------------------------------------------------
-
--- Profiles: users can read/update their own profile
-create policy "Users can view own profile"
-  on public.profiles for select
-  using (auth.uid() = id);
-
-create policy "Users can update own profile"
-  on public.profiles for update
-  using (auth.uid() = id);
-
--- Organization members: a user can see memberships they belong to
-create policy "Users can view their memberships"
-  on public.organization_members for select
-  using (auth.uid() = user_id);
-
--- Organizations: a user can see organizations they are an active member of
-create policy "Users can view their organizations"
-  on public.organizations for select
-  using (
-    id in (
-      select organization_id
-      from public.organization_members
-      where user_id = auth.uid() and status = 'active'
-    )
-  );
-
--- Business data isolation (example for properties — same pattern for others)
--- These policies assume the tables already exist.
-do $$ begin
-  if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'properties') then
-    execute $pol$
-      create policy "Tenant isolation for properties"
-        on public.properties for all
-        using (
-          organization_id in (
-            select organization_id
-            from public.organization_members
-            where user_id = auth.uid() and status = 'active'
-          )
-        )
-        with check (
-          organization_id in (
-            select organization_id
-            from public.organization_members
-            where user_id = auth.uid() and status = 'active'
-          )
-        );
-    $pol$;
-  end if;
-end $$;
-
--- Note: Similar policies for clients, needs, follow_ups, activities
--- will be added in a follow-up migration after the tables are confirmed.
-
--- ------------------------------------------------------------
--- 7. Helper function: get current user's active organization ids
+-- 7. Helper: active organization IDs (hardened)
+--    Used by RLS to avoid recursive policy evaluation.
 -- ------------------------------------------------------------
 create or replace function public.user_organization_ids()
 returns setof uuid
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
   select organization_id
   from public.organization_members
-  where user_id = auth.uid() and status = 'active';
+  where user_id = auth.uid()
+    and status = 'active';
 $$;
 
-comment on function public.user_organization_ids is 'Returns organization IDs the current user belongs to (active only)';
+revoke all on function public.user_organization_ids() from public;
+revoke all on function public.user_organization_ids() from anon;
+grant execute on function public.user_organization_ids() to authenticated;
+
+comment on function public.user_organization_ids() is
+  'Returns organization IDs where the current user is an active member. SECURITY DEFINER; search_path empty.';
+
+-- ------------------------------------------------------------
+-- 8. Table privileges (minimum; does not alter service_role bypass)
+--    REVOKE ALL clears SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER
+--    from PUBLIC / anon / authenticated before granting only what is needed.
+-- ------------------------------------------------------------
+revoke all on table public.organizations from public;
+revoke all on table public.organizations from anon;
+revoke all on table public.organizations from authenticated;
+grant select on table public.organizations to authenticated;
+-- no direct INSERT/UPDATE/DELETE for authenticated (writes via RPC in 003)
+
+revoke all on table public.organization_members from public;
+revoke all on table public.organization_members from anon;
+revoke all on table public.organization_members from authenticated;
+grant select on table public.organization_members to authenticated;
+-- no direct INSERT/UPDATE/DELETE for authenticated (owner row via RPC)
+
+revoke all on table public.profiles from public;
+revoke all on table public.profiles from anon;
+revoke all on table public.profiles from authenticated;
+grant select, update on table public.profiles to authenticated;
+-- no INSERT for authenticated here (profile creation is a later concern)
+
+-- Business tables: only if they exist; allow DML under RLS, deny anon
+do $$ begin
+  if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'properties') then
+    execute 'revoke all on table public.properties from public';
+    execute 'revoke all on table public.properties from anon';
+    execute 'grant select, insert, update, delete on table public.properties to authenticated';
+  end if;
+  if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'clients') then
+    execute 'revoke all on table public.clients from public';
+    execute 'revoke all on table public.clients from anon';
+    execute 'grant select, insert, update, delete on table public.clients to authenticated';
+  end if;
+  if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'needs') then
+    execute 'revoke all on table public.needs from public';
+    execute 'revoke all on table public.needs from anon';
+    execute 'grant select, insert, update, delete on table public.needs to authenticated';
+  end if;
+  if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'follow_ups') then
+    execute 'revoke all on table public.follow_ups from public';
+    execute 'revoke all on table public.follow_ups from anon';
+    execute 'grant select, insert, update, delete on table public.follow_ups to authenticated';
+  end if;
+  if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'activities') then
+    execute 'revoke all on table public.activities from public';
+    execute 'revoke all on table public.activities from anon';
+    execute 'grant select, insert, update, delete on table public.activities to authenticated';
+  end if;
+end $$;
+
+-- ------------------------------------------------------------
+-- 9. RLS policies (re-run safe)
+-- ------------------------------------------------------------
+drop policy if exists "Users can view own profile" on public.profiles;
+drop policy if exists "Users can update own profile" on public.profiles;
+
+create policy "Users can view own profile"
+  on public.profiles for select
+  to authenticated
+  using (auth.uid() = id);
+
+create policy "Users can update own profile"
+  on public.profiles for update
+  to authenticated
+  using (auth.uid() = id)
+  with check (auth.uid() = id);
+
+drop policy if exists "Users can view their memberships" on public.organization_members;
+drop policy if exists "Members can view organization members" on public.organization_members;
+
+-- Temporary narrow policy; 003 widens SELECT to all members of same org via helper
+create policy "Users can view their memberships"
+  on public.organization_members for select
+  to authenticated
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can view their organizations" on public.organizations;
+
+create policy "Users can view their organizations"
+  on public.organizations for select
+  to authenticated
+  using (
+    id in (select public.user_organization_ids())
+  );
+
+-- properties isolation (only if table exists)
+do $$ begin
+  if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'properties') then
+    execute 'drop policy if exists "Tenant isolation for properties" on public.properties';
+    execute $pol$
+      create policy "Tenant isolation for properties"
+        on public.properties for all
+        to authenticated
+        using (
+          organization_id in (select public.user_organization_ids())
+        )
+        with check (
+          organization_id in (select public.user_organization_ids())
+        );
+    $pol$;
+  end if;
+end $$;
 
 -- ============================================================
 -- End of 001_initial_multitenant.sql
