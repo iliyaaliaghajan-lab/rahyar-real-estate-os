@@ -59,13 +59,14 @@ create index if not exists idx_org_members_org on public.organization_members(or
 comment on table public.organization_members is 'Links users to organizations with role and status';
 
 -- ------------------------------------------------------------
--- 4. Add organization_id to core business tables
---    (these tables may already exist in a previous Supabase project;
---     the statements are written to be safe if columns are missing)
+-- 4. Add organization_id to core business tables (only if table exists)
 -- ------------------------------------------------------------
 
 do $$ begin
-  if not exists (
+  if exists (
+    select 1 from information_schema.tables
+    where table_schema = 'public' and table_name = 'properties'
+  ) and not exists (
     select 1 from information_schema.columns
     where table_schema = 'public' and table_name = 'properties' and column_name = 'organization_id'
   ) then
@@ -74,7 +75,10 @@ do $$ begin
 end $$;
 
 do $$ begin
-  if not exists (
+  if exists (
+    select 1 from information_schema.tables
+    where table_schema = 'public' and table_name = 'clients'
+  ) and not exists (
     select 1 from information_schema.columns
     where table_schema = 'public' and table_name = 'clients' and column_name = 'organization_id'
   ) then
@@ -83,7 +87,10 @@ do $$ begin
 end $$;
 
 do $$ begin
-  if not exists (
+  if exists (
+    select 1 from information_schema.tables
+    where table_schema = 'public' and table_name = 'needs'
+  ) and not exists (
     select 1 from information_schema.columns
     where table_schema = 'public' and table_name = 'needs' and column_name = 'organization_id'
   ) then
@@ -92,7 +99,10 @@ do $$ begin
 end $$;
 
 do $$ begin
-  if not exists (
+  if exists (
+    select 1 from information_schema.tables
+    where table_schema = 'public' and table_name = 'follow_ups'
+  ) and not exists (
     select 1 from information_schema.columns
     where table_schema = 'public' and table_name = 'follow_ups' and column_name = 'organization_id'
   ) then
@@ -101,7 +111,10 @@ do $$ begin
 end $$;
 
 do $$ begin
-  if not exists (
+  if exists (
+    select 1 from information_schema.tables
+    where table_schema = 'public' and table_name = 'activities'
+  ) and not exists (
     select 1 from information_schema.columns
     where table_schema = 'public' and table_name = 'activities' and column_name = 'organization_id'
   ) then
