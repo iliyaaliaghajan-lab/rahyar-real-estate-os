@@ -231,6 +231,8 @@ comment on function public.user_organization_ids() is
 -- 8. Table privileges (minimum; does not alter service_role bypass)
 --    REVOKE ALL clears SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER
 --    from PUBLIC / anon / authenticated before granting only what is needed.
+--    No ALTER DEFAULT PRIVILEGES here (requires known role owners on staging).
+--    Core tables use gen_random_uuid(); no serial sequences to grant.
 -- ------------------------------------------------------------
 revoke all on table public.organizations from public;
 revoke all on table public.organizations from anon;
@@ -250,31 +252,39 @@ revoke all on table public.profiles from authenticated;
 grant select, update on table public.profiles to authenticated;
 -- no INSERT for authenticated here (profile creation is a later concern)
 
--- Business tables: only if they exist; allow DML under RLS, deny anon
+-- Business tables: only if they exist.
+-- REVOKE ALL from public, anon, AND authenticated first so inherited
+-- TRUNCATE/REFERENCES/TRIGGER (and any other extras) are cleared,
+-- then grant only row DML under RLS.
 do $$ begin
   if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'properties') then
     execute 'revoke all on table public.properties from public';
     execute 'revoke all on table public.properties from anon';
+    execute 'revoke all on table public.properties from authenticated';
     execute 'grant select, insert, update, delete on table public.properties to authenticated';
   end if;
   if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'clients') then
     execute 'revoke all on table public.clients from public';
     execute 'revoke all on table public.clients from anon';
+    execute 'revoke all on table public.clients from authenticated';
     execute 'grant select, insert, update, delete on table public.clients to authenticated';
   end if;
   if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'needs') then
     execute 'revoke all on table public.needs from public';
     execute 'revoke all on table public.needs from anon';
+    execute 'revoke all on table public.needs from authenticated';
     execute 'grant select, insert, update, delete on table public.needs to authenticated';
   end if;
   if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'follow_ups') then
     execute 'revoke all on table public.follow_ups from public';
     execute 'revoke all on table public.follow_ups from anon';
+    execute 'revoke all on table public.follow_ups from authenticated';
     execute 'grant select, insert, update, delete on table public.follow_ups to authenticated';
   end if;
   if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'activities') then
     execute 'revoke all on table public.activities from public';
     execute 'revoke all on table public.activities from anon';
+    execute 'revoke all on table public.activities from authenticated';
     execute 'grant select, insert, update, delete on table public.activities to authenticated';
   end if;
 end $$;
