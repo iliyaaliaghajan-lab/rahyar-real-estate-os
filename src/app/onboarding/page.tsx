@@ -20,45 +20,26 @@ function OnboardingForm() {
     setError(null);
 
     const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
 
-    if (!user) {
-      router.replace('/login');
-      return;
-    }
-
-    // 1. Create the organization
-    const { data: org, error: orgError } = await supabase
-      .from('organizations')
-      .insert({ name: name.trim() })
-      .select('id')
-      .single();
-
-    if (orgError || !org) {
-      setLoading(false);
-      setError(orgError?.message || 'خطا در ایجاد مجموعه. لطفاً دوباره تلاش کنید.');
-      return;
-    }
-
-    // 2. Add current user as owner
-    const { error: memberError } = await supabase
-      .from('organization_members')
-      .insert({
-        organization_id: org.id,
-        user_id: user.id,
-        role: 'owner',
-        status: 'active',
-        joined_at: new Date().toISOString(),
-      });
+    // Atomic server-side creation: identity and role are fixed inside the function.
+    // Client only supplies the organization name.
+    const { data, error: rpcError } = await supabase.rpc('create_organization_with_owner', {
+      p_name: name.trim(),
+    });
 
     setLoading(false);
 
-    if (memberError) {
-      setError(memberError.message || 'مجموعه ایجاد شد اما عضویت ثبت نشد. با پشتیبانی تماس بگیرید.');
+    if (rpcError) {
+      setError(rpcError.message || 'خطا در ایجاد مجموعه. لطفاً دوباره تلاش کنید.');
       return;
     }
 
-    // Success → go to home
+    // rpc returns an array of rows: [{ organization_id, organization_name }]
+    if (!data || (Array.isArray(data) && data.length === 0)) {
+      setError('مجموعه ایجاد نشد. لطفاً دوباره تلاش کنید.');
+      return;
+    }
+
     router.replace('/');
   }
 
