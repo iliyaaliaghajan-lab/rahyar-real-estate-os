@@ -152,7 +152,22 @@ describe('migration 005 invitations (static SQL contract)', () => {
     assert.match(sql005, /v_caller_role NOT IN \('owner', 'admin'\)/);
   });
 
-  it('stores token_hash not a plaintext-only column name for secrets', () => {
+  it('create invitation fails closed when zero active memberships', () => {
+    assert.match(sql005, /v_active_count = 0/);
+    assert.match(sql005, /No active organization membership/);
+  });
+
+  it('create invitation fails closed when multiple active memberships (no ORDER BY LIMIT 1)', () => {
+    assert.match(sql005, /v_active_count > 1/);
+    assert.match(sql005, /Multiple active organization memberships/);
+    // Must not pick an arbitrary org
+    assert.doesNotMatch(
+      sql005,
+      /ORDER BY om\.joined_at NULLS LAST, om\.created_at\s*\n\s*LIMIT 1/,
+    );
+  });
+
+  it('stores token_hash and uses digest', () => {
     assert.match(sql005, /token_hash text NOT NULL/);
     assert.match(sql005, /extensions\.digest\(/);
   });
@@ -161,9 +176,15 @@ describe('migration 005 invitations (static SQL contract)', () => {
     assert.match(sql005, /Email does not match invitation/);
   });
 
-  it('accept is single-use and expires pending invites', () => {
+  it('accept rejects already accepted and enforces expires_at without UPDATE then RAISE', () => {
     assert.match(sql005, /Invitation already accepted/);
+    assert.match(sql005, /expires_at < now\(\)/);
     assert.match(sql005, /Invitation expired/);
+    // No rolled-back pattern: SET status = 'expired' immediately before RAISE EXCEPTION 'Invitation expired'
+    assert.doesNotMatch(
+      sql005,
+      /SET status = 'expired'[\s\S]{0,120}RAISE EXCEPTION 'Invitation expired'/,
+    );
   });
 
   it('invite RPCs are SECURITY DEFINER with empty search_path', () => {
