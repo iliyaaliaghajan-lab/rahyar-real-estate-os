@@ -1,15 +1,21 @@
 import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
 
+function safeNextPath(raw: string | null): string {
+  if (!raw) return '/';
+  if (!raw.startsWith('/') || raw.startsWith('//')) return '/';
+  if (raw.includes('://')) return '/';
+  return raw;
+}
+
 /**
  * Auth callback handler.
- * Exchanges the code from the magic-link email for a session,
- * then redirects the user to the home page.
+ * Exchanges the magic-link code for a session, then redirects to a safe relative path.
  */
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get('code');
-  const next = searchParams.get('next') ?? '/';
+  const next = safeNextPath(searchParams.get('next'));
 
   if (code) {
     const supabase = createClient();
@@ -20,6 +26,5 @@ export async function GET(request: Request) {
     }
   }
 
-  // If something went wrong, send the user back to login with an error hint
   return NextResponse.redirect(`${origin}/login?error=auth_callback_failed`);
 }
