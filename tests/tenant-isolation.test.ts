@@ -160,7 +160,6 @@ describe('migration 005 invitations (static SQL contract)', () => {
   it('create invitation fails closed when multiple active memberships (no ORDER BY LIMIT 1)', () => {
     assert.match(sql005, /v_active_count > 1/);
     assert.match(sql005, /Multiple active organization memberships/);
-    // Must not pick an arbitrary org
     assert.doesNotMatch(
       sql005,
       /ORDER BY om\.joined_at NULLS LAST, om\.created_at\s*\n\s*LIMIT 1/,
@@ -180,10 +179,22 @@ describe('migration 005 invitations (static SQL contract)', () => {
     assert.match(sql005, /Invitation already accepted/);
     assert.match(sql005, /expires_at < now\(\)/);
     assert.match(sql005, /Invitation expired/);
-    // No rolled-back pattern: SET status = 'expired' immediately before RAISE EXCEPTION 'Invitation expired'
     assert.doesNotMatch(
       sql005,
       /SET status = 'expired'[\s\S]{0,120}RAISE EXCEPTION 'Invitation expired'/,
+    );
+  });
+
+  it('accept rejects when membership row already exists; does not ON CONFLICT DO UPDATE', () => {
+    assert.match(sql005, /Membership already exists/);
+    assert.doesNotMatch(sql005, /ON CONFLICT\s*\(\s*organization_id\s*,\s*user_id\s*\)\s*DO UPDATE/i);
+    assert.doesNotMatch(sql005, /EXCLUDED\.role/);
+  });
+
+  it('enforces at most one active membership per user at index level', () => {
+    assert.match(
+      sql005,
+      /idx_org_members_one_active_per_user[\s\S]*?organization_members \(user_id\)[\s\S]*?status = 'active'/
     );
   });
 
