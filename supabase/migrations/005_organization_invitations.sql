@@ -6,6 +6,11 @@
 -- Token hashing uses extensions.digest (Supabase pgcrypto).
 -- Does NOT send email. Does NOT grant owner via invite.
 -- Phase 1: caller must have exactly one active membership (fail closed).
+--
+-- BEFORE creating idx_org_members_one_active_per_user: ensure no user has
+-- more than one active membership, or CREATE UNIQUE INDEX will fail:
+--   SELECT user_id, count(*) FROM organization_members
+--   WHERE status = 'active' GROUP BY user_id HAVING count(*) > 1;
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -52,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_org_invitations_status_expires
   ON public.organization_invitations(status, expires_at);
 
 -- Phase 1: at most one active membership per user (DB-enforced).
--- Blocks concurrent accept of two different-org invites both becoming active.
+-- Fails if pre-existing duplicate active rows exist for the same user_id.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_org_members_one_active_per_user
   ON public.organization_members (user_id)
   WHERE (status = 'active');
@@ -215,10 +220,6 @@ COMMENT ON FUNCTION public.create_organization_invitation(text, public.member_ro
 -- ------------------------------------------------------------
 -- 5. accept_organization_invitation(token)
 -- ------------------------------------------------------------
--- Expiration: reject when expires_at < now() without persisting status=expired
--- (UPDATE then RAISE would roll back).
--- Existing membership for same org+user: reject; never overwrite role/status.
--- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.accept_organization_invitation(p_token text)
 RETURNS TABLE (
   organization_id uuid,
@@ -287,7 +288,6 @@ BEGIN
     RAISE EXCEPTION 'Invalid invitation role';
   END IF;
 
-  -- Any existing membership row for this org+user blocks accept (no overwrite).
   IF EXISTS (
     SELECT 1
     FROM public.organization_members om
@@ -305,7 +305,6 @@ BEGIN
     RAISE EXCEPTION 'User already belongs to another organization';
   END IF;
 
-  -- Insert only; unique (organization_id, user_id) and partial unique active user_id.
   INSERT INTO public.organization_members (
     organization_id,
     user_id,
