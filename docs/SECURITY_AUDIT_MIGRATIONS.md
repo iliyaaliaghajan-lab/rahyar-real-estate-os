@@ -1,90 +1,87 @@
 # Security audit — multi-tenant migrations (اتحاد)
 
-**Branch:** `audit/staging-security-completion` (from `fix/staging-migration-security`)  
-**Base security work:** `fix/staging-migration-security` @ `8c25109`  
-**Scope:** SQL migrations 001–003 (+ optional 004 design). **Not** a production readiness claim.
+**Working branch (this revision):** `fix/staging-security-audit-v2`  
+**Base:** `audit/staging-security-completion` @ `1b7cd1f6fb559b6334741263d8516a8a19f566c7`  
+**Scope:** Migrations 001–003, executable 004 (profile trigger only), static contracts, docs.  
+**Not** production readiness or proven RLS.
 
-## Severity legend
+---
 
-| Level | Meaning |
-|-------|---------|
-| Critical | Cross-tenant data exposure or auth bypass if deployed as-is for real multi-org use |
-| High | Meaningful gap before relying on DB isolation |
-| Medium | Hardening / re-run / future objects |
-| Low | Documentation or cleanup |
+## 1. Static review and local tests (done in-repo)
 
-## Findings
+| Area | Evidence |
+|------|----------|
+| 001 table grants | REVOKE ALL from public/anon/authenticated; minimal GRANT; business tables conditional |
+| 003 RPC | Single arg `p_name`; `auth.uid()`; fixed owner/active; DEFINER; EXECUTE grants |
+| 004 | Profile trigger only; no executable `ALTER DEFAULT PRIVILEGES` |
+| App paths | login/callback do not insert `profiles`; onboarding RPC only `p_name` |
+| Unit tests | `tests/tenant-isolation.test.ts` reads real SQL/TS sources |
+| Commands | `npm test`, `npm run typecheck`, `npm run lint` (see commit report) |
 
-### H1 — App business data still in IndexedDB
-- **Where:** Application repositories (Dexie), not migrations.
-- **Why:** RLS cannot protect browser-local data.
-- **Impact:** Two devices/users do not get server-side tenant isolation for listings/clients yet.
-- **Fix:** Later phase — Supabase repositories + migration of data. Out of scope for SQL-only audit.
+**Passing unit tests does not prove database security.**
 
-### H2 — Default privileges for *future* objects
-- **Where:** Not fully controlled in 001–003; design in `004_default_privs_and_profile.sql`.
-- **Why:** Staging previously showed broad default grants for creator roles (`postgres` / `supabase_admin`).
-- **Impact:** New tables could inherit wide `authenticated`/`anon` rights until explicit REVOKE/GRANT.
-- **Fix:** After live read of `pg_default_acl`, apply `ALTER DEFAULT PRIVILEGES FOR ROLE <creator> … REVOKE ALL … FROM anon, authenticated, PUBLIC` then grant per table. **Do not apply blindly.**
+---
 
-### H3 — Profile row not created by app signup path
-- **Where:** `src/app/login/page.tsx` (OTP only); `src/app/auth/callback/route.ts` (session exchange only); no `profiles` insert.
-- **Why:** 001 grants SELECT/UPDATE on profiles, no INSERT policy; no trigger in 001–003.
-- **Impact:** Team UI may lack `full_name`; not an org-isolation bypass by itself.
-- **Fix:** Optional 004 trigger `handle_new_user` inserts only `NEW.id` from `auth.users`.
+## 2. Hypotheses / needs live staging (not proven here)
 
-### M1 — `create_organization_with_owner` owner and table INSERT rights
-- **Where:** `003_secure_org_policies.sql`.
-- **Why:** Function is `SECURITY DEFINER` with fixed `auth.uid()` and role `owner`; client cannot pass `user_id`/`role`.
-- **Impact:** Works only if function owner can INSERT into `organizations` / `organization_members` despite revoked client INSERT.
-- **Fix:** Live check function owner + successful RPC on staging.
+| Item | Why live data is required |
+|------|---------------------------|
+| `pg_default_acl` + object owners | Default privileges are per **creator role**; roles differ by project |
+| Effective table/function ACLs after 001–003 | Catalog may differ from migration text if manual changes exist |
+| Owner of `SECURITY DEFINER` functions | Must be able to INSERT org/members/profiles |
+| Trigger on `auth.users` allowed | Supabase may restrict who can create triggers on `auth` |
+| RPC success after REVOKE INSERT on tables | DEFINER path must work in practice |
+| IndexedDB business data | App still local; RLS does not cover it |
 
-### M2 — Re-run / partial failure of 001
-- **Where:** 001 types (exception-safe), policies (DROP IF EXISTS), grants (re-applicable).
-- **Why:** SQL Editor may not wrap the whole file in one transaction.
-- **Impact:** Partial apply possible; re-run largely safe for hardened 001 but not a substitute for transactional apply.
+**Default privileges:** see `docs/DEFAULT_PRIVILEGES_GUIDE.md`. No in-repo migration applies them automatically — final SQL needs live `FOR ROLE` list.
 
-### M3 — Business tables absent on empty staging
-- **Where:** 001/002 conditional blocks.
-- **Why:** By design — no CREATE for properties/clients/…
-- **Impact:** Tenant isolation policies for business data are inactive until those tables exist + 002 policies applied.
+---
 
-### L1 — Dual helpers `user_organization_ids` / `user_active_organization_ids`
-- **Where:** 001 and 003.
-- **Why:** Same filter; both hardened with empty `search_path` and EXECUTE grants.
-- **Impact:** Low; optional later consolidation.
+## 3. Database tests not executed
+
+All scenarios in `docs/STAGING_RLS_TEST_PLAN.md` (S1–S9): two users, two orgs, cross-tenant deny, anon deny, optional profile after signup. **Status: not run.**
+
+Integration tests against Supabase **cannot** run in this environment without project credentials and an explicit decision to touch staging. None were run.
+
+---
+
+## 4. Suggested staging evaluation steps (do not run from this audit)
+
+1. Use only isolated staging project.  
+2. Apply 001 → 002 → 003 in order (optional 004 after review).  
+3. Inspect grants and `pg_default_acl` (guide queries).  
+4. Execute S1–S7 from the RLS plan; record pass/fail.  
+5. If 004 applied, run S8.  
+6. Only then decide on default-privilege `ALTER`s using discovered roles.  
+7. Do not merge to `main` or deploy production based solely on unit tests.
+
+---
+
+## Findings (severity)
+
+| ID | Severity | Summary |
+|----|----------|---------|
+| H1 | High | Business data still IndexedDB — no server tenant isolation for listings/clients |
+| H2 | High | Future-object default privileges unknown until live `pg_default_acl` |
+| H3 | Medium→mitigated in SQL text | Profile bootstrap via 004 trigger design; **apply + verify live** |
+| M1 | Medium | DEFINER function owner / INSERT rights need live proof |
+| M2 | Medium | Partial migration apply in SQL Editor still possible |
+| M3 | Medium | Business RLS inactive until those tables exist |
+
+---
 
 ## Migration order
 
-1. `001_initial_multitenant.sql` — core tables, grants, helper, RLS  
-2. `002_business_tables_rls.sql` — business policies if tables exist  
-3. `003_secure_org_policies.sql` — RPC + membership SELECT  
-4. `004_default_privs_and_profile.sql` — optional; only after live privilege review  
+1. `001_initial_multitenant.sql`  
+2. `002_business_tables_rls.sql`  
+3. `003_secure_org_policies.sql`  
+4. `004_default_privs_and_profile.sql` — **profile trigger only** (optional)  
+5. Default privileges — **manual after guide**, not part of auto 004  
 
-## Effective permissions model (design intent after 001–003)
-
-| Object | anon | authenticated | service_role |
-|--------|------|---------------|--------------|
-| organizations | none | SELECT only | bypass (admin) |
-| organization_members | none | SELECT only | bypass |
-| profiles | none | SELECT, UPDATE (own row via RLS) | bypass |
-| business tables (if any) | none | SELECT/INSERT/UPDATE/DELETE under RLS | bypass |
-| create_organization_with_owner | no EXECUTE | EXECUTE | — |
-| user_*_organization_ids | no EXECUTE | EXECUTE | — |
-
-TRUNCATE/REFERENCES/TRIGGER: cleared via REVOKE ALL before minimal GRANT on tables touched by 001.
-
-## Live staging tests (read-only design — not executed here)
-
-1. Two users A/B; each `rpc create_organization_with_owner`  
-2. A cannot SELECT B’s org/members  
-3. A cannot INSERT/UPDATE/DELETE org/members directly  
-4. A cannot change role via API  
-5. anon cannot SELECT org tables or EXECUTE RPC  
-6. After signup (if 004 applied): profiles row exists with `id = auth.users.id`  
-7. `\dp` / `pg_default_acl` match intent  
+---
 
 ## Explicit non-claims
 
-- Passing `npm test` / typecheck / lint does **not** prove RLS.  
-- This document does **not** approve merge to `main` or production deploy.  
+- No claim that RLS is verified.  
+- No approval to merge `main` or ship production.  
+- No Supabase/Netlify changes were made by this audit branch work.  
