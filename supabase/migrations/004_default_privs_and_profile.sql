@@ -1,40 +1,32 @@
 -- ============================================================
 -- 004_default_privs_and_profile.sql
--- OPTIONAL hardening after 001–003 (review before any apply)
+-- Profile bootstrap after auth.users insert (executable section only)
 -- ============================================================
--- Prerequisites: 001, 002, 003 applied on an isolated staging project only.
--- DO NOT run on production. DO NOT apply until privileges are reviewed live.
+-- Prerequisites: 001 applied (public.profiles exists).
+-- Optional after 001–003 on isolated staging only. NOT for production without review.
 --
--- Default privileges only affect FUTURE objects created by the role named
--- in FOR ROLE. On Supabase, schema owners are often postgres / supabase_admin.
--- Adjust FOR ROLE after confirming with:
---   SELECT defaclrole::regrole, defaclobjtype, defaclacl FROM pg_default_acl;
+-- IMPORTANT — default privileges are NOT modified by this file.
+-- ALTER DEFAULT PRIVILEGES needs live knowledge of which roles create objects
+-- (see pg_default_acl). Guidance lives in docs/DEFAULT_PRIVILEGES_GUIDE.md.
+-- Applying guessed FOR ROLE values would be unsafe.
 -- ============================================================
 
 -- ------------------------------------------------------------
--- A) Future tables/sequences: do not auto-grant to client roles
---    (run only if current role matches object creator on staging)
+-- handle_new_user: create profiles row for new Auth user
 -- ------------------------------------------------------------
--- Example pattern (enable after confirming role names on staging):
---
--- ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
---   REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated;
--- ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
---   REVOKE ALL ON SEQUENCES FROM PUBLIC, anon, authenticated;
--- ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
---   REVOKE ALL ON FUNCTIONS FROM PUBLIC;
---
--- Same blocks may be needed FOR ROLE supabase_admin if that role creates objects.
--- After creating any new business table, grant explicitly, e.g.:
---   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.<name> TO authenticated;
---   REVOKE ALL ON TABLE public.<name> FROM anon, PUBLIC;
---   ALTER TABLE public.<name> ENABLE ROW LEVEL SECURITY;
---   + tenant isolation policy using public.user_organization_ids()
+-- Design notes (static review):
+-- * SECURITY DEFINER + search_path = '' limits search_path hijack risk.
+-- * Inserts only NEW.id — client cannot choose another user's id.
+-- * full_name / avatar_url are nullable in 001; COALESCE may yield NULL — OK.
+-- * ON CONFLICT DO NOTHING: re-run / existing profile does not fail Auth insert.
+-- * No EXECUTE for anon/authenticated/PUBLIC: clients must not call this RPC.
+--   Triggers run as the function owner via the engine, not via client EXECUTE.
+-- * Function owner must be allowed to INSERT into public.profiles (usually the
+--   migration role). That ownership/privilege is only verifiable on live DB.
+-- * If this function raises, Auth user insert fails — keep body minimal and
+--   conflict-safe. Do not add strict NOT NULL on full_name here.
+-- ------------------------------------------------------------
 
--- ------------------------------------------------------------
--- B) Profile row after signup (SECURITY DEFINER trigger)
---    Inserts only NEW.id from auth.users — client cannot pick another user id.
--- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -49,6 +41,7 @@ BEGIN
     NEW.raw_user_meta_data->>'avatar_url'
   )
   ON CONFLICT (id) DO NOTHING;
+
   RETURN NEW;
 END;
 $$;
@@ -56,20 +49,18 @@ $$;
 REVOKE ALL ON FUNCTION public.handle_new_user() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.handle_new_user() FROM anon;
 REVOKE ALL ON FUNCTION public.handle_new_user() FROM authenticated;
--- No GRANT EXECUTE to client roles: trigger is invoked by the engine on auth.users INSERT.
+-- Intentionally no GRANT EXECUTE to client roles.
 
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW
   EXECUTE FUNCTION public.handle_new_user();
 
--- profiles: keep client from inserting arbitrary ids; trigger owns insert
--- (001 already: GRANT SELECT, UPDATE only to authenticated + RLS own row)
-
 COMMENT ON FUNCTION public.handle_new_user() IS
-  'Creates public.profiles row for new auth.users. id is always NEW.id from Auth.';
+  'After auth.users insert: upsert profiles row with id = NEW.id only. Not client-callable.';
 
 -- ============================================================
--- End of 004_default_privs_and_profile.sql
+-- End of 004 (executable). Default privileges: see docs/DEFAULT_PRIVILEGES_GUIDE.md
 -- ============================================================
