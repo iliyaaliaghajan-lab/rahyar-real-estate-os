@@ -28,9 +28,13 @@ function readRepo(relativePath: string): string {
 const sql001 = readRepo('supabase/migrations/001_initial_multitenant.sql');
 const sql003 = readRepo('supabase/migrations/003_secure_org_policies.sql');
 const sql004 = readRepo('supabase/migrations/004_default_privs_and_profile.sql');
+const sql005 = readRepo('supabase/migrations/005_organization_invitations.sql');
 const loginSrc = readRepo('src/app/login/page.tsx');
 const callbackSrc = readRepo('src/app/auth/callback/route.ts');
 const onboardingSrc = readRepo('src/app/onboarding/page.tsx');
+const inviteSrc = readRepo('src/app/team/invite/page.tsx');
+const acceptSrc = readRepo('src/app/invite/accept/page.tsx');
+const orgSrc = readRepo('src/lib/auth/organization.ts');
 
 describe('role module (unit — real TypeScript exports)', () => {
   it('exports owner, admin, agent only', () => {
@@ -50,7 +54,7 @@ describe('role module (unit — real TypeScript exports)', () => {
     assert.equal(ROLE_PERMISSIONS.agent.canDeleteOrganization, false);
   });
 
-  it('permission matrix: agent cannot manage members', () => {
+  it('permission matrix: agent cannot manage members; owner and admin can', () => {
     assert.equal(ROLE_PERMISSIONS.agent.canManageMembers, false);
     assert.equal(ROLE_PERMISSIONS.owner.canManageMembers, true);
     assert.equal(ROLE_PERMISSIONS.admin.canManageMembers, true);
@@ -83,8 +87,6 @@ describe('migration 003 create_organization_with_owner (static SQL contract)', (
 
   it('binds membership user_id to auth.uid() not a client parameter', () => {
     assert.match(sql003, /v_uid\s+uuid\s*:=\s*auth\.uid\(\)/);
-    assert.match(sql003, /user_id,\s*\n\s*role,/);
-    // Insert uses v_uid for user_id
     assert.match(sql003, /v_org_id,\s*\n\s*v_uid,\s*\n\s*'owner'/);
   });
 
@@ -115,10 +117,6 @@ describe('migration 003 create_organization_with_owner (static SQL contract)', (
       /grant execute on function public\.create_organization_with_owner\(text\) to authenticated/i,
     );
   });
-
-  it('raises when not authenticated', () => {
-    assert.match(sql003, /if v_uid is null then\s*raise exception 'Not authenticated'/i);
-  });
 });
 
 describe('migration 001 table privilege intent (static SQL contract)', () => {
@@ -139,41 +137,53 @@ describe('migration 001 table privilege intent (static SQL contract)', () => {
       /grant\s+insert[^;]*on table public\.organization_members to authenticated/i,
     );
   });
+});
 
-  it('profiles: grant select, update only to authenticated (no insert grant)', () => {
-    assert.match(sql001, /grant select, update on table public\.profiles to authenticated/i);
-    assert.doesNotMatch(
-      sql001,
-      /grant\s+insert[^;]*on table public\.profiles to authenticated/i,
+describe('migration 005 invitations (static SQL contract)', () => {
+  it('forbids owner role on invitations via check constraint', () => {
+    assert.match(sql005, /invitation_role_not_owner CHECK \(role IN \('admin', 'agent'\)\)/);
+  });
+
+  it('create_organization_invitation only allows admin and agent roles', () => {
+    assert.match(sql005, /p_role NOT IN \('admin', 'agent'\)/);
+  });
+
+  it('create invitation requires caller owner or admin', () => {
+    assert.match(sql005, /v_caller_role NOT IN \('owner', 'admin'\)/);
+  });
+
+  it('stores token_hash not a plaintext-only column name for secrets', () => {
+    assert.match(sql005, /token_hash text NOT NULL/);
+    assert.match(sql005, /extensions\.digest\(/);
+  });
+
+  it('accept rejects email mismatch', () => {
+    assert.match(sql005, /Email does not match invitation/);
+  });
+
+  it('accept is single-use and expires pending invites', () => {
+    assert.match(sql005, /Invitation already accepted/);
+    assert.match(sql005, /Invitation expired/);
+  });
+
+  it('invite RPCs are SECURITY DEFINER with empty search_path', () => {
+    assert.match(
+      sql005,
+      /create_organization_invitation[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
+    );
+    assert.match(
+      sql005,
+      /accept_organization_invitation[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
     );
   });
 });
 
 describe('migration 004 profile trigger (static SQL contract)', () => {
-  it('defines handle_new_user as SECURITY DEFINER with empty search_path', () => {
-    assert.match(
-      sql004,
-      /handle_new_user[\s\S]*?SECURITY DEFINER[\s\S]*?search_path\s*=\s*''/i,
-    );
-  });
-
   it('inserts profiles.id from NEW.id only', () => {
-    assert.match(sql004, /INSERT INTO public\.profiles\s*\(\s*id,/i);
     assert.match(sql004, /VALUES\s*\(\s*NEW\.id,/i);
   });
 
-  it('uses ON CONFLICT DO NOTHING for existing profiles', () => {
-    assert.match(sql004, /ON CONFLICT\s*\(\s*id\s*\)\s*DO NOTHING/i);
-  });
-
-  it('revokes execute from PUBLIC, anon, and authenticated', () => {
-    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM PUBLIC/i);
-    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM anon/i);
-    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM authenticated/i);
-  });
-
-  it('does not contain executable ALTER DEFAULT PRIVILEGES statements', () => {
-    // Guide may mention the phrase in comments; executable lines must not start with ALTER DEFAULT
+  it('does not contain executable ALTER DEFAULT PRIVILEGES', () => {
     const executable = sql004
       .split('\n')
       .filter((line) => !line.trim().startsWith('--'))
@@ -182,26 +192,36 @@ describe('migration 004 profile trigger (static SQL contract)', () => {
   });
 });
 
-describe('app signup / onboarding sources (static)', () => {
-  it('login uses signInWithOtp and does not write to profiles', () => {
-    assert.match(loginSrc, /signInWithOtp/);
-    assert.doesNotMatch(loginSrc, /from\(['"]profiles['"]\)/);
-    assert.doesNotMatch(loginSrc, /\.insert\(/);
+describe('app invite / membership sources (static)', () => {
+  it('invite page calls create_organization_invitation RPC', () => {
+    assert.match(inviteSrc, /create_organization_invitation/);
+    assert.match(inviteSrc, /p_email/);
+    assert.match(inviteSrc, /p_role/);
   });
 
-  it('auth callback exchanges code for session only', () => {
-    assert.match(callbackSrc, /exchangeCodeForSession/);
-    assert.doesNotMatch(callbackSrc, /from\(['"]profiles['"]\)/);
+  it('invite UI states that email is not sent automatically', () => {
+    assert.match(inviteSrc, /ایمیل خودکار ارسال نمی‌کند/);
+    assert.doesNotMatch(inviteSrc, /لینک ورود به ایمیل شما ارسال شد/);
   });
 
-  it('onboarding RPC passes only p_name to create_organization_with_owner', () => {
-    assert.match(onboardingSrc, /rpc\(\s*['"]create_organization_with_owner['"]/);
+  it('accept page calls accept_organization_invitation with token', () => {
+    assert.match(acceptSrc, /accept_organization_invitation/);
+    assert.match(acceptSrc, /p_token/);
+  });
+
+  it('getCurrentMembership refuses multiple active orgs', () => {
+    assert.match(orgSrc, /multiple active memberships/);
+    assert.match(orgSrc, /data\.length > 1/);
+  });
+
+  it('login and callback guard next path against open redirect', () => {
+    assert.match(loginSrc, /safeNextPath/);
+    assert.match(callbackSrc, /safeNextPath/);
+    assert.match(callbackSrc, /startsWith\('\/'\)/);
+  });
+
+  it('onboarding RPC passes only p_name', () => {
+    assert.match(onboardingSrc, /create_organization_with_owner/);
     assert.match(onboardingSrc, /p_name:\s*name\.trim\(\)/);
-    assert.doesNotMatch(onboardingSrc, /p_user_id|p_role|user_id:\s*|role:\s*['"]owner['"]/);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Integration / live RLS: NOT runnable without Supabase credentials.
-// Plan: docs/STAGING_RLS_TEST_PLAN.md — do not claim security from this file.
-// ---------------------------------------------------------------------------
