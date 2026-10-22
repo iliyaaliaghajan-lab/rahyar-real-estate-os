@@ -117,6 +117,10 @@ describe('migration 003 create_organization_with_owner (static SQL contract)', (
       /grant execute on function public\.create_organization_with_owner\(text\) to authenticated/i,
     );
   });
+
+  it('raises when not authenticated', () => {
+    assert.match(sql003, /if v_uid is null then\s*raise exception 'Not authenticated'/i);
+  });
 });
 
 describe('migration 001 table privilege intent (static SQL contract)', () => {
@@ -136,6 +140,46 @@ describe('migration 001 table privilege intent (static SQL contract)', () => {
       sql001,
       /grant\s+insert[^;]*on table public\.organization_members to authenticated/i,
     );
+  });
+
+  it('profiles: grant select, update only to authenticated (no insert grant)', () => {
+    assert.match(sql001, /grant select, update on table public\.profiles to authenticated/i);
+    assert.doesNotMatch(
+      sql001,
+      /grant\s+insert[^;]*on table public\.profiles to authenticated/i,
+    );
+  });
+});
+
+describe('migration 004 profile trigger (static SQL contract)', () => {
+  it('defines handle_new_user as SECURITY DEFINER with empty search_path', () => {
+    assert.match(
+      sql004,
+      /handle_new_user[\s\S]*?SECURITY DEFINER[\s\S]*?search_path\s*=\s*''/i,
+    );
+  });
+
+  it('inserts profiles.id from NEW.id only', () => {
+    assert.match(sql004, /INSERT INTO public\.profiles\s*\(\s*id,/i);
+    assert.match(sql004, /VALUES\s*\(\s*NEW\.id,/i);
+  });
+
+  it('uses ON CONFLICT DO NOTHING for existing profiles', () => {
+    assert.match(sql004, /ON CONFLICT\s*\(\s*id\s*\)\s*DO NOTHING/i);
+  });
+
+  it('revokes execute from PUBLIC, anon, and authenticated', () => {
+    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM PUBLIC/i);
+    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM anon/i);
+    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM authenticated/i);
+  });
+
+  it('does not contain executable ALTER DEFAULT PRIVILEGES statements', () => {
+    const executable = sql004
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n');
+    assert.doesNotMatch(executable, /ALTER\s+DEFAULT\s+PRIVILEGES/i);
   });
 });
 
@@ -187,14 +231,17 @@ describe('migration 005 invitations (static SQL contract)', () => {
 
   it('accept rejects when membership row already exists; does not ON CONFLICT DO UPDATE', () => {
     assert.match(sql005, /Membership already exists/);
-    assert.doesNotMatch(sql005, /ON CONFLICT\s*\(\s*organization_id\s*,\s*user_id\s*\)\s*DO UPDATE/i);
+    assert.doesNotMatch(
+      sql005,
+      /ON CONFLICT\s*\(\s*organization_id\s*,\s*user_id\s*\)\s*DO UPDATE/i,
+    );
     assert.doesNotMatch(sql005, /EXCLUDED\.role/);
   });
 
   it('enforces at most one active membership per user at index level', () => {
     assert.match(
       sql005,
-      /idx_org_members_one_active_per_user[\s\S]*?organization_members \(user_id\)[\s\S]*?status = 'active'/
+      /idx_org_members_one_active_per_user[\s\S]*?organization_members \(user_id\)[\s\S]*?status = 'active'/,
     );
   });
 
@@ -210,21 +257,24 @@ describe('migration 005 invitations (static SQL contract)', () => {
   });
 });
 
-describe('migration 004 profile trigger (static SQL contract)', () => {
-  it('inserts profiles.id from NEW.id only', () => {
-    assert.match(sql004, /VALUES\s*\(\s*NEW\.id,/i);
+describe('app signup / onboarding / invite sources (static)', () => {
+  it('login uses signInWithOtp and does not write to profiles', () => {
+    assert.match(loginSrc, /signInWithOtp/);
+    assert.doesNotMatch(loginSrc, /from\(['"]profiles['"]\)/);
+    assert.doesNotMatch(loginSrc, /\.insert\(/);
   });
 
-  it('does not contain executable ALTER DEFAULT PRIVILEGES', () => {
-    const executable = sql004
-      .split('\n')
-      .filter((line) => !line.trim().startsWith('--'))
-      .join('\n');
-    assert.doesNotMatch(executable, /ALTER\s+DEFAULT\s+PRIVILEGES/i);
+  it('auth callback exchanges code for session only and does not write profiles', () => {
+    assert.match(callbackSrc, /exchangeCodeForSession/);
+    assert.doesNotMatch(callbackSrc, /from\(['"]profiles['"]\)/);
   });
-});
 
-describe('app invite / membership sources (static)', () => {
+  it('onboarding RPC passes only p_name to create_organization_with_owner', () => {
+    assert.match(onboardingSrc, /rpc\(\s*['"]create_organization_with_owner['"]/);
+    assert.match(onboardingSrc, /p_name:\s*name\.trim\(\)/);
+    assert.doesNotMatch(onboardingSrc, /p_user_id|p_role|user_id:\s*|role:\s*['"]owner['"]/);
+  });
+
   it('invite page calls create_organization_invitation RPC', () => {
     assert.match(inviteSrc, /create_organization_invitation/);
     assert.match(inviteSrc, /p_email/);
@@ -250,10 +300,5 @@ describe('app invite / membership sources (static)', () => {
     assert.match(loginSrc, /safeNextPath/);
     assert.match(callbackSrc, /safeNextPath/);
     assert.match(callbackSrc, /startsWith\('\/'\)/);
-  });
-
-  it('onboarding RPC passes only p_name', () => {
-    assert.match(onboardingSrc, /create_organization_with_owner/);
-    assert.match(onboardingSrc, /p_name:\s*name\.trim\(\)/);
   });
 });
