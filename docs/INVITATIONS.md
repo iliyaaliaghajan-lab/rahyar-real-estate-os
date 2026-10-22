@@ -8,11 +8,27 @@
 - UI `/team/invite` — persists invite, shows **copyable link** (does **not** send email)
 - UI `/invite/accept?token=…` — accept after login; preserves token via `next`
 
+## Membership rule (create invite)
+
+Aligned with `getCurrentMembership()`:
+
+- **Exactly one** active membership → proceed if role is `owner` or `admin`
+- **Zero** active memberships → error `No active organization membership`
+- **Multiple** active memberships → error `Multiple active organization memberships` (no arbitrary `ORDER BY … LIMIT 1`)
+
+## Expiration semantics (accept)
+
+- Acceptance is rejected when `expires_at < now()` (`Invitation expired`).
+- MVP does **not** persist `status = 'expired'` inside the failing accept RPC: an `UPDATE` followed by `RAISE` would roll back in the same transaction.
+- Authoritative checks: `expires_at`, plus `status` values `pending` / `accepted` / `revoked`.
+- A later maintenance job may mark rows expired if product needs that in the table; it is not claimed by this RPC.
+
 ## What is still a stub / not done
 
-- Automatic email delivery of the invite link (no SMTP/service-role path in client)
-- Multi-organization membership for one user (accept rejects if another active org exists)
+- Automatic email delivery of the invite link
+- Multi-organization membership UX for one user
 - Live RLS verification on staging (migrations authored, **not applied** in this task)
+- Persisting `status = expired` on reject (optional cleanup job)
 
 ## Migration order
 
