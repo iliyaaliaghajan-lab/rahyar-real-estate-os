@@ -16,19 +16,28 @@ Aligned with `getCurrentMembership()`:
 - **Zero** active memberships → error `No active organization membership`
 - **Multiple** active memberships → error `Multiple active organization memberships` (no arbitrary `ORDER BY … LIMIT 1`)
 
+## Accept: existing membership
+
+- If a row already exists in `organization_members` for the same `(organization_id, user_id)` (any status), accept **fails** with `Membership already exists`.
+- Accept **never** uses `ON CONFLICT DO UPDATE` to change role or re-activate a disabled/invited row.
+- Only a **new** membership insert is allowed.
+
+## Single active organization (phase 1)
+
+- Function check: reject if user already has an **active** membership in another org.
+- Database: partial unique index `idx_org_members_one_active_per_user` on `organization_members(user_id) WHERE status = 'active'` so two concurrent accepts cannot both become active for different orgs.
+
 ## Expiration semantics (accept)
 
-- Acceptance is rejected when `expires_at < now()` (`Invitation expired`).
-- MVP does **not** persist `status = 'expired'` inside the failing accept RPC: an `UPDATE` followed by `RAISE` would roll back in the same transaction.
-- Authoritative checks: `expires_at`, plus `status` values `pending` / `accepted` / `revoked`.
-- A later maintenance job may mark rows expired if product needs that in the table; it is not claimed by this RPC.
+- Rejected when `expires_at < now()` (`Invitation expired`).
+- MVP does **not** persist `status = 'expired'` inside the failing accept RPC.
+- Authoritative: `expires_at` plus `pending` / `accepted` / `revoked`.
 
 ## What is still a stub / not done
 
 - Automatic email delivery of the invite link
-- Multi-organization membership UX for one user
+- Multi-organization membership UX (index would need revisiting)
 - Live RLS verification on staging (migrations authored, **not applied** in this task)
-- Persisting `status = expired` on reject (optional cleanup job)
 
 ## Migration order
 
