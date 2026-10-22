@@ -3,8 +3,9 @@
 -- Persisted, time-limited, single-use invitations (manual share link)
 -- ============================================================
 -- Prerequisites: 001–003 applied. Optional 004 for profiles on signup.
--- Token hashing uses extensions.digest / gen_random_bytes (Supabase pgcrypto).
+-- Token hashing uses extensions.digest (Supabase pgcrypto).
 -- Does NOT send email. Does NOT grant owner via invite.
+-- Phase 1: caller must have exactly one active membership (fail closed).
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -58,7 +59,6 @@ ALTER TABLE public.organization_invitations ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.organization_invitations FROM PUBLIC;
 REVOKE ALL ON TABLE public.organization_invitations FROM anon;
 REVOKE ALL ON TABLE public.organization_invitations FROM authenticated;
--- Clients manage invites only via SECURITY DEFINER RPCs.
 GRANT SELECT ON TABLE public.organization_invitations TO authenticated;
 
 DROP POLICY IF EXISTS "Members can view org invitations" ON public.organization_invitations;
@@ -115,6 +115,7 @@ DECLARE
   v_hash text;
   v_expires timestamptz;
   v_id uuid;
+  v_active_count int;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'Not authenticated';
@@ -129,23 +130,30 @@ BEGIN
     RAISE EXCEPTION 'Invalid role';
   END IF;
 
+  -- Fail closed: exactly one active membership (aligned with getCurrentMembership).
+  SELECT count(*)::int INTO v_active_count
+  FROM public.organization_members om
+  WHERE om.user_id = v_uid
+    AND om.status = 'active';
+
+  IF v_active_count = 0 THEN
+    RAISE EXCEPTION 'No active organization membership';
+  END IF;
+
+  IF v_active_count > 1 THEN
+    RAISE EXCEPTION 'Multiple active organization memberships';
+  END IF;
+
   SELECT om.organization_id, om.role
     INTO v_org_id, v_caller_role
   FROM public.organization_members om
   WHERE om.user_id = v_uid
-    AND om.status = 'active'
-  ORDER BY om.joined_at NULLS LAST, om.created_at
-  LIMIT 1;
-
-  IF v_org_id IS NULL THEN
-    RAISE EXCEPTION 'No active organization membership';
-  END IF;
+    AND om.status = 'active';
 
   IF v_caller_role NOT IN ('owner', 'admin') THEN
     RAISE EXCEPTION 'Not authorized to invite';
   END IF;
 
-  -- Already an active member with this email?
   IF EXISTS (
     SELECT 1
     FROM public.organization_members om
@@ -157,7 +165,6 @@ BEGIN
     RAISE EXCEPTION 'User already a member';
   END IF;
 
-  -- Revoke prior pending invites for same org+email
   UPDATE public.organization_invitations
   SET status = 'revoked',
       updated_at = now()
@@ -198,10 +205,14 @@ REVOKE ALL ON FUNCTION public.create_organization_invitation(text, public.member
 GRANT EXECUTE ON FUNCTION public.create_organization_invitation(text, public.member_role) TO authenticated;
 
 COMMENT ON FUNCTION public.create_organization_invitation(text, public.member_role) IS
-  'Owner/admin creates pending invite; returns raw token once. Role cannot be owner.';
+  'Owner/admin with exactly one active membership creates pending invite; raw token once. No owner role.';
 
 -- ------------------------------------------------------------
 -- 5. accept_organization_invitation(token)
+-- ------------------------------------------------------------
+-- Expiration: reject when expires_at < now(). MVP does NOT persist status='expired'
+-- inside this RPC when raising — an UPDATE followed by RAISE would roll back.
+-- Clients must treat expires_at (and/or the exception) as authoritative.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.accept_organization_invitation(p_token text)
 RETURNS TABLE (
@@ -255,11 +266,14 @@ BEGIN
     RAISE EXCEPTION 'Invitation revoked';
   END IF;
 
-  IF v_inv.status <> 'pending' OR v_inv.expires_at < now() THEN
-    UPDATE public.organization_invitations
-    SET status = 'expired', updated_at = now()
-    WHERE id = v_inv.id AND status = 'pending';
+  -- Time-based expiry: enforce expires_at. Do not UPDATE status then RAISE
+  -- (that write would roll back with the exception).
+  IF v_inv.expires_at < now() THEN
     RAISE EXCEPTION 'Invitation expired';
+  END IF;
+
+  IF v_inv.status <> 'pending' THEN
+    RAISE EXCEPTION 'Invitation not pending';
   END IF;
 
   IF lower(v_inv.email) <> v_email THEN
@@ -270,7 +284,6 @@ BEGIN
     RAISE EXCEPTION 'Invalid invitation role';
   END IF;
 
-  -- Single active org limitation for phase 1
   IF EXISTS (
     SELECT 1 FROM public.organization_members om
     WHERE om.user_id = v_uid AND om.status = 'active'
@@ -319,7 +332,7 @@ REVOKE ALL ON FUNCTION public.accept_organization_invitation(text) FROM anon;
 GRANT EXECUTE ON FUNCTION public.accept_organization_invitation(text) TO authenticated;
 
 COMMENT ON FUNCTION public.accept_organization_invitation(text) IS
-  'Accept pending invite by raw token; email must match auth user; one-time.';
+  'Accept pending invite by token; email match; one-time. Expiry via expires_at (status not persisted on reject).';
 
 -- ============================================================
 -- End of 005_organization_invitations.sql
