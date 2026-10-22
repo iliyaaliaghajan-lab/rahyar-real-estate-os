@@ -27,6 +27,21 @@ Aligned with `getCurrentMembership()`:
 - Function check: reject if user already has an **active** membership in another org.
 - Database: partial unique index `idx_org_members_one_active_per_user` on `organization_members(user_id) WHERE status = 'active'` so two concurrent accepts cannot both become active for different orgs.
 
+### Before applying migration 005
+
+**Must** inspect for pre-existing duplicate active memberships. Creating the partial unique index **fails** if any `user_id` already has more than one row with `status = 'active'`.
+
+```sql
+-- Run on staging before 005; fix or merge duplicates first.
+SELECT user_id, count(*) AS active_count
+FROM public.organization_members
+WHERE status = 'active'
+GROUP BY user_id
+HAVING count(*) > 1;
+```
+
+On a fresh empty staging schema this query returns no rows and the index applies cleanly.
+
 ## Expiration semantics (accept)
 
 - Rejected when `expires_at < now()` (`Invitation expired`).
