@@ -51,6 +51,12 @@ CREATE INDEX IF NOT EXISTS idx_org_invitations_org_email
 CREATE INDEX IF NOT EXISTS idx_org_invitations_status_expires
   ON public.organization_invitations(status, expires_at);
 
+-- Phase 1: at most one active membership per user (DB-enforced).
+-- Blocks concurrent accept of two different-org invites both becoming active.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_org_members_one_active_per_user
+  ON public.organization_members (user_id)
+  WHERE (status = 'active');
+
 COMMENT ON TABLE public.organization_invitations IS
   'Pending org invites; store only token_hash. Raw token returned once from RPC.';
 
@@ -130,7 +136,6 @@ BEGIN
     RAISE EXCEPTION 'Invalid role';
   END IF;
 
-  -- Fail closed: exactly one active membership (aligned with getCurrentMembership).
   SELECT count(*)::int INTO v_active_count
   FROM public.organization_members om
   WHERE om.user_id = v_uid
@@ -210,9 +215,9 @@ COMMENT ON FUNCTION public.create_organization_invitation(text, public.member_ro
 -- ------------------------------------------------------------
 -- 5. accept_organization_invitation(token)
 -- ------------------------------------------------------------
--- Expiration: reject when expires_at < now(). MVP does NOT persist status='expired'
--- inside this RPC when raising — an UPDATE followed by RAISE would roll back.
--- Clients must treat expires_at (and/or the exception) as authoritative.
+-- Expiration: reject when expires_at < now() without persisting status=expired
+-- (UPDATE then RAISE would roll back).
+-- Existing membership for same org+user: reject; never overwrite role/status.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.accept_organization_invitation(p_token text)
 RETURNS TABLE (
@@ -266,8 +271,6 @@ BEGIN
     RAISE EXCEPTION 'Invitation revoked';
   END IF;
 
-  -- Time-based expiry: enforce expires_at. Do not UPDATE status then RAISE
-  -- (that write would roll back with the exception).
   IF v_inv.expires_at < now() THEN
     RAISE EXCEPTION 'Invitation expired';
   END IF;
@@ -284,6 +287,16 @@ BEGIN
     RAISE EXCEPTION 'Invalid invitation role';
   END IF;
 
+  -- Any existing membership row for this org+user blocks accept (no overwrite).
+  IF EXISTS (
+    SELECT 1
+    FROM public.organization_members om
+    WHERE om.organization_id = v_inv.organization_id
+      AND om.user_id = v_uid
+  ) THEN
+    RAISE EXCEPTION 'Membership already exists';
+  END IF;
+
   IF EXISTS (
     SELECT 1 FROM public.organization_members om
     WHERE om.user_id = v_uid AND om.status = 'active'
@@ -292,6 +305,7 @@ BEGIN
     RAISE EXCEPTION 'User already belongs to another organization';
   END IF;
 
+  -- Insert only; unique (organization_id, user_id) and partial unique active user_id.
   INSERT INTO public.organization_members (
     organization_id,
     user_id,
@@ -304,12 +318,7 @@ BEGIN
     v_inv.role,
     'active',
     now()
-  )
-  ON CONFLICT (organization_id, user_id) DO UPDATE
-  SET role = EXCLUDED.role,
-      status = 'active',
-      joined_at = COALESCE(public.organization_members.joined_at, now()),
-      updated_at = now();
+  );
 
   UPDATE public.organization_invitations
   SET status = 'accepted',
@@ -332,7 +341,7 @@ REVOKE ALL ON FUNCTION public.accept_organization_invitation(text) FROM anon;
 GRANT EXECUTE ON FUNCTION public.accept_organization_invitation(text) TO authenticated;
 
 COMMENT ON FUNCTION public.accept_organization_invitation(text) IS
-  'Accept pending invite by token; email match; one-time. Expiry via expires_at (status not persisted on reject).';
+  'Accept pending invite; insert membership only; never overwrite existing member row.';
 
 -- ============================================================
 -- End of 005_organization_invitations.sql
