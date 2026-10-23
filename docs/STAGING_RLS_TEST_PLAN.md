@@ -10,7 +10,8 @@
 | Staging project ID | `dezonafotwyvvghbccko` |
 | Production project | `rahyar` (`gguvmewknanhzukugvpj`) — **do not use for these tests** |
 | Migrations 001–005 on staging | Reported **applied** (operator); reconfirm in SQL editor / migration history |
-| Migration 006 on staging | **Not applied** until explicitly run |
+| Migration 006 on staging | **Not applied** (authored) |
+| Migration 007 on staging | **Not applied** (authored — privacy + create validation) |
 | Auth users / orgs for E2E | Required; create via **Authentication UI only** (never raw `auth.users` SQL) |
 
 ## Execution log (fill only after real runs)
@@ -19,14 +20,14 @@
 |----------|--------|
 | Schema / grants smoke (no auth) | Operator-reported earlier: tables + RLS on; anon without SELECT; no-auth RPC → `Not authenticated` — **not re-verified in this agent session** |
 | Authenticated tenant isolation (S1–S9) | **Not run** |
-| Invitations (I1–I8) | **Not run** |
+| Invitations (I1–I14) | **Not run** |
 | Concurrent accept / dual org | **Not run** |
 | Browser login → callback → accept | **Not run** |
 
 ## Prerequisites
 
 1. Isolated project `etehad-staging` only.  
-2. Migrations **001 → 002 → 003 → 004 (optional) → 005** applied; optionally **006**.  
+2. Migrations **001 → 002 → 003 → 004 (optional) → 005** applied; optionally **006**, **007**.  
 3. `extensions.digest` / pgcrypto available.  
 4. Two (or more) disposable Auth users with known emails, confirmed in Dashboard.  
 5. App or SQL client using **staging** URL + anon key only (no service role in browser).
@@ -60,6 +61,10 @@
 | I8 | B already in another org | Fail another organization | No |
 | I9 | Accept when membership row already exists | Fail `Membership already exists` | No |
 | I10 | Concurrent dual accept same token | One success; one fail; one membership | No |
+| I11 | Authenticated agent (or any member) direct `SELECT` on `organization_invitations` | Empty / permission denied after 007 (no direct SELECT) | No |
+| I12 | Create invite for email that already has **any** membership row in same org | Fail (membership already exists for this email) | No |
+| I13 | Create invite for email with **active** membership in another org | Fail (already belongs to another organization) | No |
+| I14 | Create invite for email not yet in Auth | Success (future signup path) | No |
 
 ## Explicit non-claims
 
