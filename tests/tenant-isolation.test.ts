@@ -29,6 +29,7 @@ const sql001 = readRepo('supabase/migrations/001_initial_multitenant.sql');
 const sql003 = readRepo('supabase/migrations/003_secure_org_policies.sql');
 const sql004 = readRepo('supabase/migrations/004_default_privs_and_profile.sql');
 const sql005 = readRepo('supabase/migrations/005_organization_invitations.sql');
+const sql006 = readRepo('supabase/migrations/006_invite_fk_indexes_and_single_org_create.sql');
 const loginSrc = readRepo('src/app/login/page.tsx');
 const callbackSrc = readRepo('src/app/auth/callback/route.ts');
 const onboardingSrc = readRepo('src/app/onboarding/page.tsx');
@@ -120,6 +121,26 @@ describe('migration 003 create_organization_with_owner (static SQL contract)', (
 
   it('raises when not authenticated', () => {
     assert.match(sql003, /if v_uid is null then\s*raise exception 'Not authenticated'/i);
+  });
+});
+
+describe('migration 006 single-org create and invitation FK indexes', () => {
+  it('replaces create_organization_with_owner with active-membership guard', () => {
+    assert.match(sql006, /User already has an active organization membership/);
+    assert.match(sql006, /v_active_count > 0/);
+  });
+
+  it('keeps SECURITY DEFINER empty search_path and auth.uid identity', () => {
+    assert.match(
+      sql006,
+      /create_organization_with_owner[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
+    );
+    assert.match(sql006, /v_uid uuid := auth\.uid\(\)/);
+  });
+
+  it('adds covering indexes for invitation FK columns', () => {
+    assert.match(sql006, /idx_org_invitations_invited_by/);
+    assert.match(sql006, /idx_org_invitations_accepted_by/);
   });
 });
 
