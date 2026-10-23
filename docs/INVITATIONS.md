@@ -8,18 +8,36 @@
 - UI `/team/invite` — persists invite, shows **copyable link** (does **not** send email)
 - UI `/invite/accept?token=…` — accept after login; preserves token via `next`
 - Migration **006** — FK covering indexes on invitations; `create_organization_with_owner` rejects callers who already have an active membership
+- Migration **007** — revoke direct SELECT on invitations; drop member view policy; create pre-checks aligned with accept
 
 ## Verification status (keep these separate)
 
 | Layer | Status |
 |-------|--------|
 | Migrations **001–005** on Supabase project `etehad-staging` (`dezonafotwyvvghbccko`) | **Applied** (per staging history / prior operator report; reconfirm in Dashboard before relying on it) |
-| Migration **006** on staging | **Authored only — not applied** until operator applies it to staging |
+| Migration **006** on staging | **Authored only — not applied** |
+| Migration **007** on staging | **Authored only — not applied** (privacy revoke + create pre-checks) |
 | Static / unit contract tests (`npm test`) | Local/CI evidence only — **not** live RLS proof |
 | Live authenticated RLS / invitation E2E on staging | **Not verified** until disposable users run the plan in `docs/STAGING_RLS_TEST_PLAN.md` |
 | Browser E2E (login → accept → team) | **Not verified** |
 | Concurrency (dual accept / dual create) | **Not verified** live |
 | Production (`rahyar`) / Netlify production deploy | **Not** modified by this work |
+
+## Migration 007 (authored, not applied)
+
+File: `supabase/migrations/007_secure_invitation_privacy_and_validation.sql`
+
+- Revokes **all** direct privileges on `organization_invitations` from `PUBLIC`, `anon`, and `authenticated`.
+- Drops policy `Members can view org invitations`.
+- RLS remains enabled; `service_role` unchanged.
+- No list-invitations RPC (create/accept stay the only intentional paths).
+- `create_organization_invitation` now rejects:
+  - any existing membership row (any status) for the target email in the same organization;
+  - an **active** membership for the target email in a different organization.
+- If the target email is not yet in `auth.users`, invitation for future signup is still allowed.
+- All prior controls retained: `SECURITY DEFINER`, `search_path = ''`, caller exactly-one-active membership, owner/admin only, role `admin`|`agent`, token hashing, EXECUTE for `authenticated` only.
+
+These checks align create with accept so the system does not issue links that accept would reject.
 
 ## Membership rule (create invite)
 
@@ -73,6 +91,7 @@ Must return zero rows or the partial unique index fails.
 4. `004_default_privs_and_profile.sql` (optional profile trigger)
 5. `005_organization_invitations.sql` — requires `extensions.digest` (pgcrypto)
 6. `006_invite_fk_indexes_and_single_org_create.sql` — after 005
+7. `007_secure_invitation_privacy_and_validation.sql` — after 005 (006 optional order-independent for privacy)
 
 ## Security notes
 
@@ -81,6 +100,7 @@ Must return zero rows or the partial unique index fails.
 - Membership write via DEFINER functions only; no client INSERT grants on members
 - Login/callback `next` must be a relative path (open-redirect blocked)
 - Advisor may flag `SECURITY DEFINER` + `EXECUTE` for `authenticated` on app RPCs and RLS helpers — expected for this design; do not revoke without breaking RLS
+- After 007: authenticated clients cannot `SELECT` invitation rows directly
 
 ## Env vars (names only)
 
