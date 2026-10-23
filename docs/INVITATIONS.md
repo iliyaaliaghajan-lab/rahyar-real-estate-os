@@ -1,12 +1,25 @@
 # Organization invitations (اتحاد)
 
-## What is implemented
+## What is implemented (code + migrations authored)
 
 - Table `organization_invitations` (migration **005**)
 - RPC `create_organization_invitation(p_email, p_role)` — owner/admin only; role `admin` or `agent` only
 - RPC `accept_organization_invitation(p_token)` — authenticated user; email must match; single-use; 7-day expiry
 - UI `/team/invite` — persists invite, shows **copyable link** (does **not** send email)
 - UI `/invite/accept?token=…` — accept after login; preserves token via `next`
+- Migration **006** — FK covering indexes on invitations; `create_organization_with_owner` rejects callers who already have an active membership
+
+## Verification status (keep these separate)
+
+| Layer | Status |
+|-------|--------|
+| Migrations **001–005** on Supabase project `etehad-staging` (`dezonafotwyvvghbccko`) | **Applied** (per staging history / prior operator report; reconfirm in Dashboard before relying on it) |
+| Migration **006** on staging | **Authored only — not applied** until operator applies it to staging |
+| Static / unit contract tests (`npm test`) | Local/CI evidence only — **not** live RLS proof |
+| Live authenticated RLS / invitation E2E on staging | **Not verified** until disposable users run the plan in `docs/STAGING_RLS_TEST_PLAN.md` |
+| Browser E2E (login → accept → team) | **Not verified** |
+| Concurrency (dual accept / dual create) | **Not verified** live |
+| Production (`rahyar`) / Netlify production deploy | **Not** modified by this work |
 
 ## Membership rule (create invite)
 
@@ -24,15 +37,13 @@ Aligned with `getCurrentMembership()`:
 
 ## Single active organization (phase 1)
 
-- Function check: reject if user already has an **active** membership in another org.
-- Database: partial unique index `idx_org_members_one_active_per_user` on `organization_members(user_id) WHERE status = 'active'` so two concurrent accepts cannot both become active for different orgs.
+- Function check on accept: reject if user already has an **active** membership in another org.
+- Function check on create org (006): reject if caller already has any active membership.
+- Database: partial unique index `idx_org_members_one_active_per_user` on `organization_members(user_id) WHERE status = 'active'`.
 
-### Before applying migration 005
-
-**Must** inspect for pre-existing duplicate active memberships. Creating the partial unique index **fails** if any `user_id` already has more than one row with `status = 'active'`.
+### Before applying migration 005 (already done on empty staging)
 
 ```sql
--- Run on staging before 005; fix or merge duplicates first.
 SELECT user_id, count(*) AS active_count
 FROM public.organization_members
 WHERE status = 'active'
@@ -40,7 +51,7 @@ GROUP BY user_id
 HAVING count(*) > 1;
 ```
 
-On a fresh empty staging schema this query returns no rows and the index applies cleanly.
+Must return zero rows or the partial unique index fails.
 
 ## Expiration semantics (accept)
 
@@ -52,7 +63,7 @@ On a fresh empty staging schema this query returns no rows and the index applies
 
 - Automatic email delivery of the invite link
 - Multi-organization membership UX (index would need revisiting)
-- Live RLS verification on staging (migrations authored, **not applied** in this task)
+- Live authenticated invitation and isolation tests (see staging plan)
 
 ## Migration order
 
@@ -60,7 +71,8 @@ On a fresh empty staging schema this query returns no rows and the index applies
 2. `002_business_tables_rls.sql`
 3. `003_secure_org_policies.sql`
 4. `004_default_privs_and_profile.sql` (optional profile trigger)
-5. `005_organization_invitations.sql` — requires `extensions.digest` (pgcrypto on Supabase)
+5. `005_organization_invitations.sql` — requires `extensions.digest` (pgcrypto)
+6. `006_invite_fk_indexes_and_single_org_create.sql` — after 005
 
 ## Security notes
 
@@ -68,6 +80,7 @@ On a fresh empty staging schema this query returns no rows and the index applies
 - No `owner` role via invite (CHECK + function guard)
 - Membership write via DEFINER functions only; no client INSERT grants on members
 - Login/callback `next` must be a relative path (open-redirect blocked)
+- Advisor may flag `SECURITY DEFINER` + `EXECUTE` for `authenticated` on app RPCs and RLS helpers — expected for this design; do not revoke without breaking RLS
 
 ## Env vars (names only)
 
