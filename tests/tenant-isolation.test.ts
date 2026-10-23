@@ -30,6 +30,7 @@ const sql003 = readRepo('supabase/migrations/003_secure_org_policies.sql');
 const sql004 = readRepo('supabase/migrations/004_default_privs_and_profile.sql');
 const sql005 = readRepo('supabase/migrations/005_organization_invitations.sql');
 const sql006 = readRepo('supabase/migrations/006_invite_fk_indexes_and_single_org_create.sql');
+const sql007 = readRepo('supabase/migrations/007_secure_invitation_privacy_and_validation.sql');
 const loginSrc = readRepo('src/app/login/page.tsx');
 const callbackSrc = readRepo('src/app/auth/callback/route.ts');
 const onboardingSrc = readRepo('src/app/onboarding/page.tsx');
@@ -275,6 +276,71 @@ describe('migration 005 invitations (static SQL contract)', () => {
       sql005,
       /accept_organization_invitation[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
     );
+  });
+});
+
+describe('migration 007 invitation privacy and create validation (static SQL contract)', () => {
+  it('revokes direct table access from PUBLIC, anon, and authenticated', () => {
+    assert.match(sql007, /REVOKE ALL ON TABLE public\.organization_invitations FROM PUBLIC/);
+    assert.match(sql007, /REVOKE ALL ON TABLE public\.organization_invitations FROM anon/);
+    assert.match(sql007, /REVOKE ALL ON TABLE public\.organization_invitations FROM authenticated/);
+  });
+
+  it('drops the Members can view org invitations policy', () => {
+    assert.match(
+      sql007,
+      /DROP POLICY IF EXISTS "Members can view org invitations" ON public\.organization_invitations/,
+    );
+  });
+
+  it('does not re-grant SELECT on organization_invitations to authenticated', () => {
+    assert.doesNotMatch(
+      sql007,
+      /GRANT SELECT ON TABLE public\.organization_invitations TO authenticated/,
+    );
+  });
+
+  it('create_organization_invitation rejects any same-org membership for target email', () => {
+    assert.match(sql007, /Membership already exists for this email in the organization/);
+    assert.match(
+      sql007,
+      /om\.organization_id = v_org_id[\s\S]*?lower\(u\.email\) = v_email/,
+    );
+  });
+
+  it('create_organization_invitation rejects active membership in another org', () => {
+    assert.match(sql007, /User already belongs to another organization/);
+    assert.match(
+      sql007,
+      /om\.status = 'active'[\s\S]*?om\.organization_id <> v_org_id/,
+    );
+  });
+
+  it('keeps SECURITY DEFINER, empty search_path, and authenticated-only EXECUTE', () => {
+    assert.match(
+      sql007,
+      /create_organization_invitation[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
+    );
+    assert.match(
+      sql007,
+      /REVOKE ALL ON FUNCTION public\.create_organization_invitation\(text, public\.member_role\) FROM PUBLIC/,
+    );
+    assert.match(
+      sql007,
+      /REVOKE ALL ON FUNCTION public\.create_organization_invitation\(text, public\.member_role\) FROM anon/,
+    );
+    assert.match(
+      sql007,
+      /GRANT EXECUTE ON FUNCTION public\.create_organization_invitation\(text, public\.member_role\) TO authenticated/,
+    );
+  });
+
+  it('preserves caller exactly-one-active-membership and owner\/admin gate', () => {
+    assert.match(sql007, /v_active_count = 0/);
+    assert.match(sql007, /No active organization membership/);
+    assert.match(sql007, /v_active_count > 1/);
+    assert.match(sql007, /Multiple active organization memberships/);
+    assert.match(sql007, /v_caller_role NOT IN \('owner', 'admin'\)/);
   });
 });
 
