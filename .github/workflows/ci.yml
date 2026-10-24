@@ -17,15 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Do not enable cache: npm without a package-lock.json (setup-node fails).
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
 
-      # package.json includes @supabase/*; lockfile was out of sync and briefly
-      # corrupted during repair. Use npm install until a verified lock is restored.
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Unit / static contract tests
         run: npm test
