@@ -17,13 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # cache: npm requires a non-empty package-lock.json on the branch.
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: npm
 
+      # package-lock.json is still empty on remote; npm ci would fail.
+      # Use npm install until a full lockfile commit lands.
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund
 
       - name: Unit / static contract tests
         run: npm test
