@@ -9,25 +9,25 @@
 | Staging project name | `etehad-staging` |
 | Staging project ID | `dezonafotwyvvghbccko` |
 | Production project | `rahyar` (`gguvmewknanhzukugvpj`) — **do not use for these tests** |
-| Migrations 001–005 on staging | Reported **applied** (operator); reconfirm in SQL editor / migration history |
-| Migration 006 on staging | **Not applied** (authored) |
-| Migration 007 on staging | **Not applied** (authored — privacy + create validation) |
+| Migrations 001–005 on staging | **Applied** (operator-reported migration history) |
+| Migration 006 on staging | **Not applied** (authored only) |
+| Migration 007 on staging | **Applied** (operator-authorized; recorded in staging migration history). Catalog-only follow-up (operator): no SELECT for `authenticated` / `anon` / `PUBLIC` on `public.organization_invitations`; RLS enabled; no remaining policies; `authenticated` can EXECUTE `create_organization_invitation`; `anon` / `PUBLIC` cannot. This is **not** authenticated E2E proof. |
 | Auth users / orgs for E2E | Required; create via **Authentication UI only** (never raw `auth.users` SQL) |
 
 ## Execution log (fill only after real runs)
 
 | Category | Result |
 |----------|--------|
-| Schema / grants smoke (no auth) | Operator-reported earlier: tables + RLS on; anon without SELECT; no-auth RPC → `Not authenticated` — **not re-verified in this agent session** |
+| Schema / grants smoke (catalog) | Operator-reported after 007: invitation table SELECT revoked for authenticated/anon/PUBLIC; RLS on; no policies; create RPC EXECUTE for authenticated only. **Not re-queried by an automated agent session.** |
 | Authenticated tenant isolation (S1–S9) | **Not run** |
-| Invitations (I1–I14) | **Not run** |
+| Invitations (I1–I14 / L1–L6) | **Not run** — no Staging Auth session, Dashboard login, or disposable test users available to the execution environment |
 | Concurrent accept / dual org | **Not run** |
 | Browser login → callback → accept | **Not run** |
 
 ## Prerequisites
 
 1. Isolated project `etehad-staging` only.  
-2. Migrations **001 → 002 → 003 → 004 (optional) → 005** applied; optionally **006**, **007**.  
+2. Migrations **001 → 002 → 003 → 004 (optional) → 005 → 007** applied. **006** is optional and **not** applied.  
 3. `extensions.digest` / pgcrypto available.  
 4. Two (or more) disposable Auth users with known emails, confirmed in Dashboard.  
 5. App or SQL client using **staging** URL + anon key only (no service role in browser).
@@ -69,4 +69,4 @@
 ## Explicit non-claims
 
 Until authenticated rows above are executed and recorded, **RLS and invitations are not live-verified**.  
-Schema applied ≠ security proven.
+Schema applied ≠ security proven. Catalog privilege checks ≠ a successful authenticated query.
