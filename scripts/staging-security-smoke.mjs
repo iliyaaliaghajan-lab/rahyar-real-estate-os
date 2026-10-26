@@ -56,7 +56,30 @@ function loadConfig() {
   if (confirm !== STAGING_CONFIRM) {
     refusal("Refusing to run: STAGING_SECURITY_TEST_CONFIRM does not match the Staging project.");
   }
+  if (anonKey === serviceKey) {
+    refusal("Refusing to run: STAGING_SUPABASE_ANON_KEY and STAGING_SUPABASE_SERVICE_ROLE_KEY must be different.");
+  }
+  const anonRole = jwtRoleClaim(anonKey);
+  if (anonRole === "service_role") {
+    refusal("Refusing to run: STAGING_SUPABASE_ANON_KEY must not carry the service_role claim.");
+  }
   return { url: STAGING_ORIGIN, anonKey, serviceKey };
+}
+
+/** Decode JWT payload role claim without verifying signature. Never log the token. */
+function jwtRoleClaim(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+    const json = Buffer.from(b64 + pad, "base64").toString("utf8");
+    const payload = JSON.parse(json);
+    return typeof payload?.role === "string" ? payload.role : null;
+  } catch {
+    return null;
+  }
 }
 
 function denialKind(error) {
@@ -358,25 +381,42 @@ async function main() {
   } finally {
     tokenC = null;
     tokenB = null;
-    try {
-      if (orgNames.size > 0) {
+    const cleanupFailures = [];
+    if (orgNames.size > 0) {
+      try {
         const found = await admin.from("organizations").select("id,name").in("name", [...orgNames]);
-        if (found.error) throw new Error("organization lookup failed");
-        for (const row of found.data || []) {
-          if (!orgNames.has(row.name)) continue;
-          const removed = await admin.from("organizations").delete().eq("id", row.id);
-          if (removed.error) throw new Error("organization delete failed");
+        if (found.error) {
+          cleanupFailures.push("organization lookup");
+        } else {
+          for (const row of found.data || []) {
+            if (!orgNames.has(row.name)) continue;
+            try {
+              const removed = await admin.from("organizations").delete().eq("id", row.id);
+              if (removed.error) cleanupFailures.push("organization delete");
+            } catch {
+              cleanupFailures.push("organization delete");
+            }
+          }
         }
+      } catch {
+        cleanupFailures.push("organization lookup");
       }
-      for (const id of userIds) {
+    }
+    for (const id of userIds) {
+      try {
         const removed = await admin.auth.admin.deleteUser(id);
-        if (removed.error) throw new Error("auth user delete failed");
+        if (removed.error) cleanupFailures.push("auth user delete");
+      } catch {
+        cleanupFailures.push("auth user delete");
       }
+    }
+    if (cleanupFailures.length === 0) {
       console.log(`CLEANUP OK run ${runId}`);
-    } catch {
+    } else {
       cleanupFailed = true;
+      const kinds = [...new Set(cleanupFailures)].join(", ");
       console.error(
-        `CLEANUP FAIL run ${runId} — disposable rows may remain; delete only this run id manually in Staging.`,
+        `CLEANUP FAIL run ${runId} kinds=${kinds} — disposable rows may remain; delete only this run id manually in Staging.`,
       );
     }
   }
