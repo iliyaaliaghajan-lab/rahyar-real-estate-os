@@ -2,6 +2,8 @@
 
 **Status:** Plan + status board. Local `npm test` is **not** evidence these passed.
 
+An opt-in runner exists at `scripts/staging-security-smoke.mjs` (`npm run test:staging-security`). It is **not** part of CI. It requires `STAGING_SUPABASE_URL`, `STAGING_SUPABASE_ANON_KEY`, `STAGING_SUPABASE_SERVICE_ROLE_KEY`, and `STAGING_SECURITY_TEST_CONFIRM=dezonafotwyvvghbccko`, and it refuses every origin except `https://dezonafotwyvvghbccko.supabase.co`. See `docs/STAGING_AUTOMATED_SECURITY_TESTS.md`. **No live scenario below has been executed by that runner.**
+
 ## Environment
 
 | Item | Value |
