@@ -1,0 +1,55 @@
+# Opt-in live Staging security smoke. Never runs on push or pull_request.
+# Requires GitHub Environment "etehad-staging-security" with secrets:
+#   STAGING_SUPABASE_ANON_KEY
+#   STAGING_SUPABASE_SERVICE_ROLE_KEY
+# Manual confirmation input must be set to true. Branch must be the feature branch.
+name: Staging security smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_staging_run:
+        description: >-
+          Set to true only to run the live Staging security smoke against
+          project dezonafotwyvvghbccko. Default false refuses the run.
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  staging-security-smoke:
+    name: Staging security smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Branch pin + explicit confirmation. No push/PR triggers above.
+    if: >-
+      github.ref == 'refs/heads/feat/etehad-secure-invitations-and-rls'
+      && inputs.confirm_staging_run == true
+    # Secrets come from this Environment. No deployment URL is published.
+    environment:
+      name: etehad-staging-security
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run staging security smoke
+        env:
+          STAGING_SUPABASE_URL: https://dezonafotwyvvghbccko.supabase.co
+          STAGING_SECURITY_TEST_CONFIRM: dezonafotwyvvghbccko
+          STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run test:staging-security
