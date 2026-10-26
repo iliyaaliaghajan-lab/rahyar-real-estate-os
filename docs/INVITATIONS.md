@@ -14,16 +14,16 @@
 
 | Layer | Status |
 |-------|--------|
-| Migrations **001–005** on Supabase project `etehad-staging` (`dezonafotwyvvghbccko`) | **Applied** (per staging history / prior operator report; reconfirm in Dashboard before relying on it) |
+| Migrations **001–005** on Supabase project `etehad-staging` (`dezonafotwyvvghbccko`) | **Applied** (operator-reported staging history) |
 | Migration **006** on staging | **Authored only — not applied** |
-| Migration **007** on staging | **Authored only — not applied** (privacy revoke + create pre-checks) |
+| Migration **007** on staging | **Applied** (operator-authorized; present in staging migration history). Catalog check (operator, not an automated re-query): no direct SELECT for `authenticated` / `anon` / `PUBLIC`; RLS on; no policies left; EXECUTE of `create_organization_invitation` for `authenticated` only. **Does not prove** authenticated create/accept or tenant isolation. |
 | Static / unit contract tests (`npm test`) | Local/CI evidence only — **not** live RLS proof |
-| Live authenticated RLS / invitation E2E on staging | **Not verified** until disposable users run the plan in `docs/STAGING_RLS_TEST_PLAN.md` |
+| Live authenticated RLS / invitation E2E on staging | **Not verified** — no disposable Staging sessions available to the execution environment |
 | Browser E2E (login → accept → team) | **Not verified** |
 | Concurrency (dual accept / dual create) | **Not verified** live |
 | Production (`rahyar`) / Netlify production deploy | **Not** modified by this work |
 
-## Migration 007 (authored, not applied)
+## Migration 007 (applied on Staging; authored in repo)
 
 File: `supabase/migrations/007_secure_invitation_privacy_and_validation.sql`
 
@@ -38,6 +38,8 @@ File: `supabase/migrations/007_secure_invitation_privacy_and_validation.sql`
 - All prior controls retained: `SECURITY DEFINER`, `search_path = ''`, caller exactly-one-active membership, owner/admin only, role `admin`|`agent`, token hashing, EXECUTE for `authenticated` only.
 
 These checks align create with accept so the system does not issue links that accept would reject.
+
+Catalog metadata matching the revoke/EXECUTE claims was **operator-reported** after application. Authenticated behavior is still **not run**.
 
 ## Membership rule (create invite)
 
@@ -56,7 +58,7 @@ Aligned with `getCurrentMembership()`:
 ## Single active organization (phase 1)
 
 - Function check on accept: reject if user already has an **active** membership in another org.
-- Function check on create org (006): reject if caller already has any active membership.
+- Function check on create org (006): reject if caller already has any active membership. **006 is not applied on Staging**; the partial unique index from **005** is the database backstop if 005 is applied.
 - Database: partial unique index `idx_org_members_one_active_per_user` on `organization_members(user_id) WHERE status = 'active'`.
 
 ### Before applying migration 005 (already done on empty staging)
@@ -90,8 +92,8 @@ Must return zero rows or the partial unique index fails.
 3. `003_secure_org_policies.sql`
 4. `004_default_privs_and_profile.sql` (optional profile trigger)
 5. `005_organization_invitations.sql` — requires `extensions.digest` (pgcrypto)
-6. `006_invite_fk_indexes_and_single_org_create.sql` — after 005
-7. `007_secure_invitation_privacy_and_validation.sql` — after 005 (006 optional order-independent for privacy)
+6. `006_invite_fk_indexes_and_single_org_create.sql` — after 005 (**not applied on Staging**)
+7. `007_secure_invitation_privacy_and_validation.sql` — after 005 (**applied on Staging**)
 
 ## Security notes
 
@@ -100,7 +102,7 @@ Must return zero rows or the partial unique index fails.
 - Membership write via DEFINER functions only; no client INSERT grants on members
 - Login/callback `next` must be a relative path (open-redirect blocked)
 - Advisor may flag `SECURITY DEFINER` + `EXECUTE` for `authenticated` on app RPCs and RLS helpers — expected for this design; do not revoke without breaking RLS
-- After 007: authenticated clients cannot `SELECT` invitation rows directly
+- After 007: authenticated clients cannot `SELECT` invitation rows directly (catalog-confirmed by operator; not live-session confirmed)
 
 ## Env vars (names only)
 
