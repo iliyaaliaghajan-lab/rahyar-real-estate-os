@@ -14,7 +14,7 @@ An opt-in runner exists at `scripts/staging-security-smoke.mjs` (`npm run test:s
 | Migrations 001–005 on staging | **Applied** (operator-reported migration history) |
 | Migration 006 on staging | **Not applied** (authored only) |
 | Migration 007 on staging | **Applied** (operator-authorized; recorded in staging migration history). Catalog-only follow-up (operator): no SELECT for `authenticated` / `anon` / `PUBLIC` on `public.organization_invitations`; RLS enabled; no remaining policies; `authenticated` can EXECUTE `create_organization_invitation`; `anon` / `PUBLIC` cannot. This is **not** authenticated E2E proof. |
-| Auth users / orgs for E2E | Required; create via **Authentication UI only** (never raw `auth.users` SQL) |
+| Auth users / orgs for E2E | **Automated runner:** creates its own disposable users via Auth Admin APIs (no pre-created users). **Manual UI path:** create via Authentication Dashboard only (never raw `auth.users` SQL). Live scenarios below remain **Not run** until executed. |
 
 ## Execution log (fill only after real runs)
 
@@ -31,8 +31,8 @@ An opt-in runner exists at `scripts/staging-security-smoke.mjs` (`npm run test:s
 1. Isolated project `etehad-staging` only.  
 2. Migrations **001 → 002 → 003 → 004 (optional) → 005 → 007** applied. **006** is optional and **not** applied.  
 3. `extensions.digest` / pgcrypto available.  
-4. Two (or more) disposable Auth users with known emails, confirmed in Dashboard.  
-5. App or SQL client using **staging** URL + anon key only (no service role in browser).
+4. **Automated path:** export the four Staging-only env vars and run `npm run test:staging-security` (runner provisions disposable users itself).  
+5. **Manual path (optional):** two or more disposable Auth users via the Authentication Dashboard, then exercise scenarios with the staging anon key only (no service role in browser).
 
 ## Core tenant scenarios
 

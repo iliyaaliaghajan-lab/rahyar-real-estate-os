@@ -2,7 +2,7 @@
 
 Opt-in runner: `scripts/staging-security-smoke.mjs`.
 
-It is **not** part of `npm test` or GitHub Actions. A normal push or pull request must not call it. The script mutates Staging: it creates disposable Auth users and organizations, then deletes only those objects.
+It is **not** part of `npm test` or GitHub Actions. A normal push or pull request must not call it. The script mutates Staging: it creates disposable Auth users via Auth Admin APIs and organizations, then deletes only those objects. **It does not require pre-created Auth users.** Manual Dashboard users remain an option only for hand-run tests outside this runner.
 
 ## What it checks
 
@@ -29,13 +29,13 @@ All four must be set. The process exits before any network call if one is missin
 | Variable | Required value |
 |----------|----------------|
 | `STAGING_SUPABASE_URL` | Exactly the origin `https://dezonafotwyvvghbccko.supabase.co` |
-| `STAGING_SUPABASE_ANON_KEY` | Staging anon key |
-| `STAGING_SUPABASE_SERVICE_ROLE_KEY` | Staging service-role key |
+| `STAGING_SUPABASE_ANON_KEY` | Staging **anon** key (must not be the service-role JWT) |
+| `STAGING_SUPABASE_SERVICE_ROLE_KEY` | Staging **service-role** key (must differ from the anon key) |
 | `STAGING_SECURITY_TEST_CONFIRM` | Exactly `dezonafotwyvvghbccko` |
 
 There is no override for another project id. The Production ref `gguvmewknanhzukugvpj` is refused.
 
-The service-role key is used only to create disposable Auth users, mint one-time magic links that are not emailed, and delete this run's users and uniquely named organizations. Assertions use a separate client created with the **anon** key and `verifyOtp` for that user.
+The service-role key is used only to create disposable Auth users, mint one-time magic links that are not emailed, and delete this run's users and uniquely named organizations. Assertions use a separate client created with the **anon** key and `verifyOtp` for that user. If the two keys are identical, or if the anon slot carries a `service_role` JWT claim, the runner refuses before any network call. Cleanup tries each org and each Auth user independently so one failure does not skip the rest.
 
 Never put the service-role key in a browser bundle or in any `NEXT_PUBLIC_*` variable.
 

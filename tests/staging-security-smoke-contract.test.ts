@@ -66,4 +66,19 @@ describe("staging security smoke runner contract", () => {
     assert.doesNotMatch(executable, /supabase\s+db\s+push/i);
     assert.doesNotMatch(executable, /migration/i);
   });
+
+  it("refuses identical anon and service-role keys and service_role in the anon slot", () => {
+    assert.match(runner, /anonKey === serviceKey/);
+    assert.match(runner, /must be different/);
+    assert.match(runner, /function jwtRoleClaim/);
+    assert.match(runner, /STAGING_SUPABASE_ANON_KEY must not carry the service_role claim/);
+  });
+
+  it("attempts cleanup of each disposable auth user even if organization cleanup fails", () => {
+    assert.match(runner, /cleanupFailures/);
+    assert.match(runner, /kinds=\$\{kinds\}/);
+    const orgBlock = runner.indexOf("organization lookup");
+    const userLoop = runner.indexOf("for (const id of userIds)");
+    assert.ok(orgBlock > 0 && userLoop > orgBlock, "user cleanup must follow org cleanup and run independently");
+  });
 });
