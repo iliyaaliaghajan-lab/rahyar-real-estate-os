@@ -10,7 +10,8 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "typecheck:logic": "tsc --noEmit -p tsconfig.logic.json",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "test:staging-security": "node scripts/staging-security-smoke.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",
