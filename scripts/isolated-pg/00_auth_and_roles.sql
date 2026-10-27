@@ -1,8 +1,25 @@
--- Isolated Postgres stubs for Supabase-style auth + API roles.
--- Used only by verify/migration-008-isolated-postgres workflow.
--- Does NOT touch any live Supabase project.
+-- Isolated Postgres fixtures for the Migration 008 verification harness only.
+-- Never run this against Supabase, Staging, or Production.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Minimal pre-existing business tables ensure migration 001/002 and migration
+-- 008's dynamic tenant-policy DDL are executed, rather than silently skipped.
+CREATE TABLE IF NOT EXISTS public.properties (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid
+);
+CREATE TABLE IF NOT EXISTS public.clients (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid
+);
+CREATE TABLE IF NOT EXISTS public.needs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid
+);
+CREATE TABLE IF NOT EXISTS public.follow_ups (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid
+);
+CREATE TABLE IF NOT EXISTS public.activities (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid
+);
 
 DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -13,10 +30,13 @@ CREATE SCHEMA IF NOT EXISTS auth;
 CREATE TABLE IF NOT EXISTS auth.users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email text,
+  -- Required by public.handle_new_user() from migration 004.
+  raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Allow non-superuser migrators to create FKs to auth.users
+-- Non-superuser migration-role fixtures must be able to create the auth FK
+-- and trigger used in this isolated harness. This is test-only, not a live grant.
 GRANT USAGE ON SCHEMA auth TO PUBLIC;
 GRANT SELECT, REFERENCES ON TABLE auth.users TO PUBLIC;
 
