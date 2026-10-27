@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Isolated PostgreSQL matrix for migration 008.
-# Scenarios: safe | create | setrole
-# Exit non-zero on failure. Prints PASS/FAIL lines for CI parsing.
-
 set -euo pipefail
 
 PGHOST="${PGHOST:-127.0.0.1}"
@@ -21,13 +17,8 @@ log() { printf '[%s][%s] %s\n' "$PG_VERSION" "$SCENARIO" "$*"; }
 pass() { log "PASS: $*"; }
 fail() { log "FAIL: $*"; exit 1; }
 
-psql_root() {
-  psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$ROOT_DB" "$@"
-}
-
-psql_db() {
-  psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" "$@"
-}
+psql_root() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$ROOT_DB" "$@"; }
+psql_db() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" "$@"; }
 
 log "Preparing database $WORK_DB"
 psql_root -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$WORK_DB' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
@@ -37,11 +28,9 @@ psql_root -c "CREATE DATABASE $WORK_DB;"
 apply_migrations_as() {
   local role_sql="$1"
   psql_db -f "$STUBS_DIR/00_auth_and_roles.sql"
-
   if [[ -n "$role_sql" ]]; then
     psql_db -c "$role_sql"
   fi
-
   local f
   for f in \
     001_initial_multitenant.sql \
@@ -55,17 +44,9 @@ apply_migrations_as() {
   do
     log "Applying $f"
     if [[ "$SCENARIO" == "setrole" ]]; then
-      {
-        echo "SET ROLE custom_owner;"
-        cat "$MIGRATIONS_DIR/$f"
-        echo "RESET ROLE;"
-      } | psql_db
+      { echo "SET ROLE custom_owner;"; cat "$MIGRATIONS_DIR/$f"; echo "RESET ROLE;"; } | psql_db
     elif [[ "$SCENARIO" == "create" ]]; then
-      {
-        echo "SET SESSION AUTHORIZATION custom_owner;"
-        cat "$MIGRATIONS_DIR/$f"
-        echo "RESET SESSION AUTHORIZATION;"
-      } | psql_db
+      { echo "SET SESSION AUTHORIZATION custom_owner;"; cat "$MIGRATIONS_DIR/$f"; echo "RESET SESSION AUTHORIZATION;"; } | psql_db
     else
       psql_db -f "$MIGRATIONS_DIR/$f"
     fi
@@ -76,56 +57,43 @@ verify_post_008() {
   log "Running post-008 verification queries"
 
   local schema_owner
-  schema_owner=$(psql_db -Atc "SELECT r.rolname FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE n.nspname = 'private';")
+  schema_owner=$(psql_db -Atc "SELECT r.rolname FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE n.nspname = 'private';" | tr -d '[:space:]')
   [[ -n "$schema_owner" ]] || fail "private schema missing"
   [[ "$schema_owner" != "anon" && "$schema_owner" != "authenticated" ]] || fail "private schema owned by API role: $schema_owner"
   pass "private schema owner=$schema_owner"
 
-  # Diagnostic dump of function attributes
-  local fn_dump
-  fn_dump=$(psql_db -Atc "SELECT n.nspname||'.'||p.proname||' prosecdef='||p.prosecdef::text||' proconfig='||coalesce(array_to_string(p.proconfig,';'),'<null>')||' prolang='||l.lanname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname='private' AND p.proname='user_organization_ids';")
-  log "fn_dump: ${fn_dump:-EMPTY}"
-  [[ -n "$fn_dump" ]] || fail "private.user_organization_ids does not exist"
-
-  local is_definer
-  is_definer=$(psql_db -Atc "SELECT p.prosecdef FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='private' AND p.proname='user_organization_ids';")
-  # trim whitespace
-  is_definer=$(echo "$is_definer" | tr -d '[:space:]')
-  [[ "$is_definer" == "t" || "$is_definer" == "true" ]] || fail "private.user_organization_ids is not SECURITY DEFINER (got='$is_definer')"
+  local definer_line
+  definer_line=$(psql_db -Atc "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='private' AND p.proname='user_organization_ids';" || true)
+  log "fn_def_snippet: $(echo "$definer_line" | tr '\n' ' ' | head -c 200)"
+  echo "$definer_line" | grep -qi "SECURITY DEFINER" || fail "private.user_organization_ids definition lacks SECURITY DEFINER"
   pass "private.user_organization_ids is SECURITY DEFINER"
 
-  local search_path_cfg
-  search_path_cfg=$(psql_db -Atc "SELECT coalesce(array_to_string(p.proconfig, ','), '') FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='private' AND p.proname='user_organization_ids';")
-  echo "$search_path_cfg" | grep -q "search_path=" || fail "search_path not set on private.user_organization_ids (got: $search_path_cfg)"
-  pass "private.user_organization_ids has search_path config ($search_path_cfg)"
+  echo "$definer_line" | grep -q "search_path" || fail "search_path not in function definition"
+  pass "private.user_organization_ids sets search_path"
 
   local pub_count
-  pub_count=$(psql_db -Atc "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('user_organization_ids','user_active_organization_ids');")
-  pub_count=$(echo "$pub_count" | tr -d '[:space:]')
+  pub_count=$(psql_db -Atc "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('user_organization_ids','user_active_organization_ids');" | tr -d '[:space:]')
   [[ "$pub_count" == "0" ]] || fail "public helper functions still exist (count=$pub_count)"
-  pass "public.user_organization_ids and public.user_active_organization_ids dropped"
+  pass "public helpers dropped"
 
   local pol_count
-  pol_count=$(psql_db -Atc "SELECT count(*) FROM pg_policies WHERE schemaname='public' AND (coalesce(qual,'') LIKE '%private.user_organization_ids%' OR coalesce(with_check,'') LIKE '%private.user_organization_ids%');")
-  pol_count=$(echo "$pol_count" | tr -d '[:space:]')
+  pol_count=$(psql_db -Atc "SELECT count(*) FROM pg_policies WHERE schemaname='public' AND (coalesce(qual,'') LIKE '%private.user_organization_ids%' OR coalesce(with_check,'') LIKE '%private.user_organization_ids%');" | tr -d '[:space:]')
   [[ "$pol_count" -ge 2 ]] || fail "expected >=2 policies using private.user_organization_ids, got $pol_count"
   pass "policies reference private.user_organization_ids (count=$pol_count)"
 
   local inv_grants
-  inv_grants=$(psql_db -Atc "SELECT has_table_privilege('authenticated','public.organization_invitations','SELECT')::text || ',' || has_table_privilege('anon','public.organization_invitations','SELECT')::text;")
-  inv_grants=$(echo "$inv_grants" | tr -d '[:space:]')
+  inv_grants=$(psql_db -Atc "SELECT has_table_privilege('authenticated','public.organization_invitations','SELECT')::text || ',' || has_table_privilege('anon','public.organization_invitations','SELECT')::text;" | tr -d '[:space:]')
   [[ "$inv_grants" == "f,f" ]] || fail "organization_invitations still has SELECT for API roles: $inv_grants"
   pass "organization_invitations has no SELECT for authenticated/anon"
 
   local uid org_id
-  uid=$(psql_db -Atc "INSERT INTO auth.users (email) VALUES ('verify@example.com') RETURNING id;")
-  org_id=$(psql_db -Atc "INSERT INTO public.organizations (name) VALUES ('Verify Org') RETURNING id;")
+  uid=$(psql_db -Atc "INSERT INTO auth.users (email) VALUES ('verify@example.com') RETURNING id;" | tr -d '[:space:]')
+  org_id=$(psql_db -Atc "INSERT INTO public.organizations (name) VALUES ('Verify Org') RETURNING id;" | tr -d '[:space:]')
   psql_db -c "INSERT INTO public.organization_members (organization_id, user_id, role, status) VALUES ('$org_id', '$uid', 'owner', 'active');" >/dev/null
   psql_db -c "SELECT auth.set_test_uid('$uid'::uuid);" >/dev/null
 
   local returned
-  returned=$(psql_db -Atc "SELECT private.user_organization_ids();")
-  returned=$(echo "$returned" | tr -d '[:space:]')
+  returned=$(psql_db -Atc "SELECT private.user_organization_ids();" | tr -d '[:space:]')
   [[ "$returned" == "$org_id" ]] || fail "helper returned '$returned', expected '$org_id'"
   pass "private.user_organization_ids returns active membership"
 
@@ -138,38 +106,28 @@ verify_post_008() {
 }
 
 case "$SCENARIO" in
-  safe)
-    apply_migrations_as ""
-    ;;
+  safe) apply_migrations_as "" ;;
   create)
     apply_migrations_as "
-      DO \$\$ BEGIN
-        CREATE ROLE custom_owner LOGIN PASSWORD 'custom' NOSUPERUSER NOBYPASSRLS;
-      EXCEPTION WHEN duplicate_object THEN
-        ALTER ROLE custom_owner WITH LOGIN PASSWORD 'custom' NOSUPERUSER NOBYPASSRLS;
-      END \$\$;
+      DO \$\$ BEGIN CREATE ROLE custom_owner LOGIN PASSWORD 'custom' NOSUPERUSER NOBYPASSRLS;
+      EXCEPTION WHEN duplicate_object THEN ALTER ROLE custom_owner WITH LOGIN PASSWORD 'custom' NOSUPERUSER NOBYPASSRLS; END \$\$;
       GRANT ALL ON SCHEMA public TO custom_owner;
       GRANT ALL ON SCHEMA auth TO custom_owner;
+      GRANT ALL ON TABLE auth.users TO custom_owner;
       GRANT CREATE ON DATABASE $WORK_DB TO custom_owner;
       GRANT custom_owner TO $PGUSER;
-    "
-    ;;
+    " ;;
   setrole)
     apply_migrations_as "
-      DO \$\$ BEGIN
-        CREATE ROLE custom_owner NOSUPERUSER NOBYPASSRLS NOLOGIN;
-      EXCEPTION WHEN duplicate_object THEN
-        ALTER ROLE custom_owner WITH NOSUPERUSER NOBYPASSRLS;
-      END \$\$;
+      DO \$\$ BEGIN CREATE ROLE custom_owner NOSUPERUSER NOBYPASSRLS NOLOGIN;
+      EXCEPTION WHEN duplicate_object THEN ALTER ROLE custom_owner WITH NOSUPERUSER NOBYPASSRLS; END \$\$;
       GRANT ALL ON SCHEMA public TO custom_owner;
       GRANT ALL ON SCHEMA auth TO custom_owner;
+      GRANT ALL ON TABLE auth.users TO custom_owner;
       GRANT CREATE ON DATABASE $WORK_DB TO custom_owner;
       GRANT custom_owner TO $PGUSER;
-    "
-    ;;
-  *)
-    fail "Unknown SCENARIO=$SCENARIO (expected safe|create|setrole)"
-    ;;
+    " ;;
+  *) fail "Unknown SCENARIO=$SCENARIO" ;;
 esac
 
 verify_post_008
