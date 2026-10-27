@@ -22,12 +22,169 @@
 -- ------------------------------------------------------------
 CREATE SCHEMA IF NOT EXISTS private;
 
+-- SECURITY PREFLIGHT A: verify expected Supabase API roles exist and that neither
+-- API role can inherit privileges from, or SET ROLE to, the owner of the schema
+-- or an already-existing helper function. Owner checks are performed separately
+-- for the schema and function; no owner-role name is assumed.
+DO $ownership_preflight$
+DECLARE
+  v_server_version_num integer := current_setting('server_version_num')::integer;
+  v_roles_found integer;
+  v_object_label text;
+  v_owner_role_oid oid;
+  v_api_role_name text;
+  v_api_role_oid oid;
+BEGIN
+  SELECT count(*)::integer
+    INTO v_roles_found
+  FROM pg_catalog.pg_roles
+  WHERE rolname IN ('anon', 'authenticated');
+
+  IF v_roles_found <> 2 THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42704',
+      MESSAGE = 'SECURITY PREFLIGHT FAILED: expected Supabase API roles "anon" and "authenticated" to exist.';
+  END IF;
+
+  FOR v_object_label, v_owner_role_oid IN
+    SELECT 'schema private'::text, n.nspowner
+    FROM pg_catalog.pg_namespace AS n
+    WHERE n.nspname = 'private'
+    UNION ALL
+    SELECT 'function private.user_organization_ids()'::text, p.proowner
+    FROM pg_catalog.pg_proc AS p
+    WHERE p.oid = pg_catalog.to_regprocedure('private.user_organization_ids()')::oid
+  LOOP
+    FOR v_api_role_name, v_api_role_oid IN
+      SELECT r.rolname, r.oid
+      FROM pg_catalog.pg_roles AS r
+      WHERE r.rolname IN ('anon', 'authenticated')
+    LOOP
+      IF v_api_role_oid = v_owner_role_oid
+         OR pg_catalog.pg_has_role(v_api_role_oid, v_owner_role_oid, 'USAGE') THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '42501',
+          MESSAGE = pg_catalog.format(
+            'SECURITY PREFLIGHT FAILED: API role "%s" is the owner or can inherit the owner role "%s" for %s.',
+            v_api_role_name,
+            (SELECT r.rolname FROM pg_catalog.pg_roles AS r WHERE r.oid = v_owner_role_oid),
+            v_object_label
+          );
+      END IF;
+
+      -- PostgreSQL 16+ separates SET from INHERIT per membership. Before 16,
+      -- MEMBER is the compatible check for membership (which enables SET ROLE).
+      IF v_server_version_num >= 160000 THEN
+        IF pg_catalog.pg_has_role(v_api_role_oid, v_owner_role_oid, 'SET') THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '42501',
+            MESSAGE = pg_catalog.format(
+              'SECURITY PREFLIGHT FAILED: API role "%s" can SET ROLE to owner role "%s" for %s.',
+              v_api_role_name,
+              (SELECT r.rolname FROM pg_catalog.pg_roles AS r WHERE r.oid = v_owner_role_oid),
+              v_object_label
+            );
+        END IF;
+      ELSE
+        IF pg_catalog.pg_has_role(v_api_role_oid, v_owner_role_oid, 'MEMBER') THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '42501',
+            MESSAGE = pg_catalog.format(
+              'SECURITY PREFLIGHT FAILED: API role "%s" can become owner role "%s" for %s through role membership.',
+              v_api_role_name,
+              (SELECT r.rolname FROM pg_catalog.pg_roles AS r WHERE r.oid = v_owner_role_oid),
+              v_object_label
+            );
+        END IF;
+      END IF;
+    END LOOP;
+  END LOOP;
+END;
+$ownership_preflight$;
+
 REVOKE ALL ON SCHEMA private FROM PUBLIC;
 REVOKE ALL ON SCHEMA private FROM anon;
+REVOKE ALL ON SCHEMA private FROM authenticated;
 GRANT USAGE ON SCHEMA private TO authenticated;
 
 COMMENT ON SCHEMA private IS
   'Internal helpers for RLS. Must not be listed in Data API exposed schemas.';
+
+-- SECURITY PREFLIGHT B: verify CREATE is not still effectively available after
+-- the grant normalization above. Check both direct privilege and effective
+-- privilege obtained via other roles (including SET ROLE paths).
+DO $create_preflight$
+DECLARE
+  v_server_version_num integer := current_setting('server_version_num')::integer;
+  v_api_role_name text;
+  v_api_role_oid oid;
+  v_candidate_role_oid oid;
+  v_candidate_role_name text;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'private'
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '3F000',
+      MESSAGE = 'SECURITY PREFLIGHT FAILED: schema private does not exist after setup.';
+  END IF;
+
+  FOR v_api_role_name, v_api_role_oid IN
+    SELECT r.rolname, r.oid
+    FROM pg_catalog.pg_roles AS r
+    WHERE r.rolname IN ('anon', 'authenticated')
+  LOOP
+    IF has_schema_privilege(v_api_role_oid, 'private', 'CREATE') THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '42501',
+        MESSAGE = pg_catalog.format(
+          'SECURITY PREFLIGHT FAILED: API role "%s" still has effective CREATE on schema private after grants were normalized.',
+          v_api_role_name
+        );
+    END IF;
+
+    FOR v_candidate_role_name, v_candidate_role_oid IN
+      SELECT r.rolname, r.oid
+      FROM pg_catalog.pg_roles AS r
+      WHERE r.rolname NOT IN ('anon', 'authenticated', 'pg_signal_backend')
+        AND has_schema_privilege(r.oid, 'private', 'CREATE')
+    LOOP
+      IF v_api_role_oid = v_candidate_role_oid
+         OR pg_catalog.pg_has_role(v_api_role_oid, v_candidate_role_oid, 'USAGE') THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '42501',
+          MESSAGE = pg_catalog.format(
+            'SECURITY PREFLIGHT FAILED: API role "%s" can obtain CREATE on schema private through role "%s" privileges.',
+            v_api_role_name,
+            v_candidate_role_name
+          );
+      END IF;
+
+      IF v_server_version_num >= 160000 THEN
+        IF pg_catalog.pg_has_role(v_api_role_oid, v_candidate_role_oid, 'SET') THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '42501',
+            MESSAGE = pg_catalog.format(
+              'SECURITY PREFLIGHT FAILED: API role "%s" can SET ROLE to "%s", which has effective CREATE on schema private.',
+              v_api_role_name,
+              v_candidate_role_name
+            );
+        END IF;
+      ELSE
+        IF pg_catalog.pg_has_role(v_api_role_oid, v_candidate_role_oid, 'MEMBER') THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '42501',
+            MESSAGE = pg_catalog.format(
+              'SECURITY PREFLIGHT FAILED: API role "%s" can become role "%s", which has effective CREATE on schema private.',
+              v_api_role_name,
+              v_candidate_role_name
+            );
+        END IF;
+      END IF;
+    END LOOP;
+  END LOOP;
+END;
+$create_preflight$;
 
 -- ------------------------------------------------------------
 -- 2. Single helper: active organization IDs for current user
@@ -47,10 +204,72 @@ $$;
 
 REVOKE ALL ON FUNCTION private.user_organization_ids() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.user_organization_ids() FROM anon;
+REVOKE ALL ON FUNCTION private.user_organization_ids() FROM authenticated;
 GRANT EXECUTE ON FUNCTION private.user_organization_ids() TO authenticated;
 
 COMMENT ON FUNCTION private.user_organization_ids() IS
   'Active organization IDs for the current user. SECURITY DEFINER; empty search_path. For RLS evaluation only.';
+
+-- SECURITY PREFLIGHT C: check the actual owner after CREATE OR REPLACE. This is
+-- independent of the schema-owner check in preflight A.
+DO $function_owner_preflight$
+DECLARE
+  v_server_version_num integer := current_setting('server_version_num')::integer;
+  v_function_owner_oid oid;
+  v_api_role_name text;
+  v_api_role_oid oid;
+BEGIN
+  SELECT p.proowner
+    INTO v_function_owner_oid
+  FROM pg_catalog.pg_proc AS p
+  WHERE p.oid = pg_catalog.to_regprocedure('private.user_organization_ids()')::oid;
+
+  IF v_function_owner_oid IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42883',
+      MESSAGE = 'SECURITY PREFLIGHT FAILED: private.user_organization_ids() was not found after creation.';
+  END IF;
+
+  FOR v_api_role_name, v_api_role_oid IN
+    SELECT r.rolname, r.oid
+    FROM pg_catalog.pg_roles AS r
+    WHERE r.rolname IN ('anon', 'authenticated')
+  LOOP
+    IF v_api_role_oid = v_function_owner_oid
+       OR pg_catalog.pg_has_role(v_api_role_oid, v_function_owner_oid, 'USAGE') THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '42501',
+        MESSAGE = pg_catalog.format(
+          'SECURITY PREFLIGHT FAILED: API role "%s" is the owner or can inherit privileges of function owner "%s" for private.user_organization_ids().',
+          v_api_role_name,
+          (SELECT r.rolname FROM pg_catalog.pg_roles AS r WHERE r.oid = v_function_owner_oid)
+        );
+    END IF;
+
+    IF v_server_version_num >= 160000 THEN
+      IF pg_catalog.pg_has_role(v_api_role_oid, v_function_owner_oid, 'SET') THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '42501',
+          MESSAGE = pg_catalog.format(
+            'SECURITY PREFLIGHT FAILED: API role "%s" can SET ROLE to function owner "%s" for private.user_organization_ids().',
+            v_api_role_name,
+            (SELECT r.rolname FROM pg_catalog.pg_roles AS r WHERE r.oid = v_function_owner_oid)
+          );
+      END IF;
+    ELSE
+      IF pg_catalog.pg_has_role(v_api_role_oid, v_function_owner_oid, 'MEMBER') THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '42501',
+          MESSAGE = pg_catalog.format(
+            'SECURITY PREFLIGHT FAILED: API role "%s" can become function owner "%s" through role membership.',
+            v_api_role_name,
+            (SELECT r.rolname FROM pg_catalog.pg_roles AS r WHERE r.oid = v_function_owner_oid)
+          );
+      END IF;
+    END IF;
+  END LOOP;
+END;
+$function_owner_preflight$;
 
 -- ------------------------------------------------------------
 -- 3. organizations / organization_members SELECT policies
@@ -78,25 +297,30 @@ CREATE POLICY "Members can view organization members"
 
 -- ------------------------------------------------------------
 -- 4. Business-table tenant policies (only if table + organization_id exist)
---    Preserve policy names and FOR ALL + USING/WITH CHECK behavior.
 -- ------------------------------------------------------------
-DO $$
+DO $tenant_policies$
 DECLARE
   t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['clients', 'needs', 'follow_ups', 'activities', 'properties']
+  FOREACH t IN ARRAY ARRAY['properties', 'clients', 'needs', 'follow_ups', 'activities']
   LOOP
     IF EXISTS (
       SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = t
+    ) AND EXISTS (
+      SELECT 1
       FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = t
-        AND column_name = 'organization_id'
+      WHERE table_schema = 'public' AND table_name = t AND column_name = 'organization_id'
     ) THEN
-      EXECUTE format('DROP POLICY IF EXISTS %L ON public.%I', 'Tenant isolation for ' || t, t);
+      EXECUTE format(
+        'DROP POLICY IF EXISTS %I ON public.%I',
+        'Tenant isolation for ' || t,
+        t
+      );
       EXECUTE format(
         $pol$
-          CREATE POLICY %L
+          CREATE POLICY %I
             ON public.%I FOR ALL
             TO authenticated
             USING (
@@ -111,52 +335,38 @@ BEGIN
       );
     END IF;
   END LOOP;
-END $$;
+END;
+$tenant_policies$;
 
 -- ------------------------------------------------------------
--- 5. profiles: one SELECT policy (self + active same-org members);
---    UPDATE keeps USING + WITH CHECK for self only.
+-- 5. Profile SELECT consolidation
 -- ------------------------------------------------------------
 DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
-DROP POLICY IF EXISTS "Users can view profiles in same organization" ON public.profiles;
-DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Users can view profiles in their organizations" ON public.profiles;
 
-CREATE POLICY "Users can view accessible profiles"
+CREATE POLICY "Users can view profiles"
   ON public.profiles
   FOR SELECT
   TO authenticated
   USING (
     id = (SELECT auth.uid())
-    OR id IN (
-      SELECT om.user_id
+    OR EXISTS (
+      SELECT 1
       FROM public.organization_members AS om
-      WHERE om.status = 'active'
+      WHERE om.user_id = public.profiles.id
+        AND om.status = 'active'
         AND om.organization_id IN (SELECT private.user_organization_ids())
     )
   );
 
-CREATE POLICY "Users can update own profile"
-  ON public.profiles
-  FOR UPDATE
-  TO authenticated
-  USING (id = (SELECT auth.uid()))
-  WITH CHECK (id = (SELECT auth.uid()));
+-- ------------------------------------------------------------
+-- 6. Invitation lock-down (intentional: no SELECT for API roles)
+-- ------------------------------------------------------------
+REVOKE SELECT ON public.organization_invitations FROM authenticated;
+REVOKE SELECT ON public.organization_invitations FROM anon;
 
 -- ------------------------------------------------------------
--- 6. Drop public helper aliases only after policies no longer reference them
+-- 7. Drop public helpers if they still exist
 -- ------------------------------------------------------------
 DROP FUNCTION IF EXISTS public.user_organization_ids();
 DROP FUNCTION IF EXISTS public.user_active_organization_ids();
-
--- ------------------------------------------------------------
--- 7. Intentional invitation lock-down (do not re-grant SELECT / re-add policies)
---    007 already revoked direct access and dropped the member view policy.
---    Re-assert grants remain closed for public client roles.
--- ------------------------------------------------------------
-REVOKE ALL ON TABLE public.organization_invitations FROM PUBLIC;
-REVOKE ALL ON TABLE public.organization_invitations FROM anon;
-REVOKE ALL ON TABLE public.organization_invitations FROM authenticated;
-
--- ============================================================
--- End of 008_rls_helper_schema_and_profile_policy_optimization.sql
--- ============================================================

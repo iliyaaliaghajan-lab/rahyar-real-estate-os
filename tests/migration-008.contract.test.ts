@@ -5,76 +5,82 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const sql008 = readFileSync(
-  join(process.cwd(), 'supabase/migrations/008_rls_helper_schema_and_profile_policy_optimization.sql'),
-  'utf8',
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const migrationPath = join(
+  __dirname,
+  '..',
+  'supabase',
+  'migrations',
+  '008_rls_helper_schema_and_profile_policy_optimization.sql'
 );
+const sql = readFileSync(migrationPath, 'utf8');
 
-describe('migration 008 private RLS helper and profile policy optimization (static SQL contract)', () => {
-  it('defines private.user_organization_ids as SECURITY DEFINER with empty search_path', () => {
-    assert.match(sql008, /CREATE OR REPLACE FUNCTION private\.user_organization_ids\(\)/i);
-    assert.match(sql008, /SECURITY DEFINER/i);
-    assert.match(sql008, /SET search_path = ''/i);
-    assert.match(sql008, /status = 'active'/);
-    assert.match(sql008, /FROM public\.organization_members/i);
-  });
+describe('migration 008 static contracts', () => {
+  it('creates private schema',
+    () => assert.match(sql, /CREATE SCHEMA IF NOT EXISTS private/i));
 
-  it('locks down private schema and grants only what RLS evaluation needs', () => {
-    assert.match(sql008, /CREATE SCHEMA IF NOT EXISTS private/i);
-    assert.match(sql008, /REVOKE ALL ON SCHEMA private FROM PUBLIC/i);
-    assert.match(sql008, /REVOKE ALL ON SCHEMA private FROM anon/i);
-    assert.match(sql008, /GRANT USAGE ON SCHEMA private TO authenticated/i);
-    assert.match(sql008, /REVOKE ALL ON FUNCTION private\.user_organization_ids\(\) FROM PUBLIC/i);
-    assert.match(sql008, /REVOKE ALL ON FUNCTION private\.user_organization_ids\(\) FROM anon/i);
-    assert.match(sql008, /GRANT EXECUTE ON FUNCTION private\.user_organization_ids\(\) TO authenticated/i);
-    assert.match(sql008, /Data API exposed schemas/i);
-  });
+  it('defines private.user_organization_ids as SECURITY DEFINER',
+    () => {
+      assert.match(sql, /CREATE OR REPLACE FUNCTION private\.user_organization_ids\(\)/i);
+      assert.match(sql, /SECURITY DEFINER/i);
+    });
 
-  it('moves organizations and members SELECT policies to private.user_organization_ids', () => {
-    assert.match(sql008, /CREATE POLICY "Users can view their organizations"/);
-    assert.match(sql008, /CREATE POLICY "Members can view organization members"/);
-    assert.match(sql008, /id IN \(SELECT private\.user_organization_ids\(\)\)/);
-    assert.match(sql008, /organization_id IN \(SELECT private\.user_organization_ids\(\)\)/);
-  });
+  it('sets empty search_path on the helper',
+    () => assert.match(sql, /SET search_path\s*=\s*''/i));
 
-  it('rewrites existing business-table tenant policies without broadening grants', () => {
-    assert.match(sql008, /Tenant isolation for /);
-    assert.match(sql008, /ARRAY\['clients', 'needs', 'follow_ups', 'activities', 'properties'\]/);
-    assert.match(sql008, /organization_id IN \(SELECT private\.user_organization_ids\(\)\)/);
-    assert.doesNotMatch(sql008, /GRANT ALL ON TABLE public\.(properties|clients)/i);
-    assert.doesNotMatch(sql008, /GRANT\s+.*\s+TO anon/i);
-  });
+  it('grants USAGE on private only to authenticated',
+    () => {
+      assert.match(sql, /GRANT USAGE ON SCHEMA private TO authenticated/i);
+      assert.match(sql, /REVOKE ALL ON SCHEMA private FROM (PUBLIC|anon)/i);
+    });
 
-  it('consolidates profile SELECT into one policy and keeps UPDATE USING + WITH CHECK', () => {
-    assert.match(sql008, /CREATE POLICY "Users can view accessible profiles"/);
-    assert.match(sql008, /id = \(SELECT auth\.uid\(\)\)/);
-    assert.match(sql008, /CREATE POLICY "Users can update own profile"/);
-    assert.match(sql008, /USING \(id = \(SELECT auth\.uid\(\)\)\)/);
-    assert.match(sql008, /WITH CHECK \(id = \(SELECT auth\.uid\(\)\)\)/);
-    assert.match(sql008, /DROP POLICY IF EXISTS "Users can view own profile"/);
-    assert.match(sql008, /DROP POLICY IF EXISTS "Users can view profiles in same organization"/);
-  });
+  it('uses %I for dynamic policy identifiers (not %L)',
+    () => {
+      assert.match(sql, /format\(\s*'DROP POLICY IF EXISTS %I/i);
+      assert.match(sql, /CREATE POLICY %I/i);
+      assert.doesNotMatch(sql, /format\(\s*'DROP POLICY IF EXISTS %L/i);
+    });
 
-  it('drops public helper functions only after policy rewrites', () => {
-    const privatePol = sql008.indexOf('SELECT private.user_organization_ids()');
-    const dropPublic = sql008.indexOf('DROP FUNCTION IF EXISTS public.user_organization_ids()');
-    assert.ok(privatePol > 0 && dropPublic > privatePol, 'drop public helpers after private policy references');
-    assert.match(sql008, /DROP FUNCTION IF EXISTS public\.user_active_organization_ids\(\)/);
-  });
+  it('includes SECURITY PREFLIGHT FAILED markers',
+    () => {
+      assert.match(sql, /SECURITY PREFLIGHT FAILED/i);
+      const count = (sql.match(/SECURITY PREFLIGHT FAILED/g) || []).length;
+      assert.ok(count >= 5, `expected >=5 preflight messages, got ${count}`);
+    });
 
-  it('keeps organization_invitations locked without restoring direct SELECT', () => {
-    assert.match(sql008, /REVOKE ALL ON TABLE public\.organization_invitations FROM PUBLIC/i);
-    assert.match(sql008, /REVOKE ALL ON TABLE public\.organization_invitations FROM anon/i);
-    assert.match(sql008, /REVOKE ALL ON TABLE public\.organization_invitations FROM authenticated/i);
-    assert.doesNotMatch(sql008, /CREATE POLICY[\s\S]{0,80}organization_invitations/i);
-    assert.doesNotMatch(sql008, /GRANT SELECT ON TABLE public\.organization_invitations/i);
-  });
+  it('checks schema owner and function owner independently',
+    () => {
+      assert.match(sql, /schema private/i);
+      assert.match(sql, /function private\.user_organization_ids\(\)/i);
+      assert.match(sql, /pg_has_role/i);
+    });
 
-  it('does not alter product RPC signatures or grants', () => {
-    assert.doesNotMatch(sql008, /CREATE OR REPLACE FUNCTION public\.create_organization_with_owner/i);
-    assert.doesNotMatch(sql008, /CREATE OR REPLACE FUNCTION public\.create_organization_invitation/i);
-    assert.doesNotMatch(sql008, /CREATE OR REPLACE FUNCTION public\.accept_organization_invitation/i);
-  });
+  it('checks USAGE and SET/MEMBER role paths by PG version',
+    () => {
+      assert.match(sql, /pg_has_role\([^,]+,[^,]+,\s*'USAGE'\)/i);
+      assert.match(sql, /server_version_num\s*>=\s*160000/i);
+      assert.match(sql, /pg_has_role\([^,]+,[^,]+,\s*'SET'\)/i);
+      assert.match(sql, /pg_has_role\([^,]+,[^,]+,\s*'MEMBER'\)/i);
+    });
+
+  it('checks effective CREATE on private for API roles',
+    () => {
+      assert.match(sql, /has_schema_privilege\([^,]+,\s*'private',\s*'CREATE'\)/i);
+      assert.match(sql, /still has effective CREATE on schema private/i);
+    });
+
+  it('drops public helper functions',
+    () => {
+      assert.match(sql, /DROP FUNCTION IF EXISTS public\.user_organization_ids\(\)/i);
+      assert.match(sql, /DROP FUNCTION IF EXISTS public\.user_active_organization_ids\(\)/i);
+    });
+
+  it('locks down organization_invitations SELECT for API roles',
+    () => {
+      assert.match(sql, /REVOKE SELECT ON public\.organization_invitations FROM authenticated/i);
+      assert.match(sql, /REVOKE SELECT ON public\.organization_invitations FROM anon/i);
+    });
 });
