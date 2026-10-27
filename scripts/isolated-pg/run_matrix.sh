@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 # Isolated PostgreSQL matrix for migration 008.
-# Scenarios:
-#   safe     – apply as superuser (postgres)
-#   create   – apply as custom non-superuser role that owns objects (CREATE path)
-#   setrole  – apply via SET ROLE to a custom role (ownership via SET ROLE)
-#
-# Versions: provided by container (PG_VERSION env).
-# Exit non-zero on any scenario failure. Prints PASS/FAIL lines for CI parsing.
+# Scenarios: safe | create | setrole
+# Exit non-zero on failure. Prints PASS/FAIL lines for CI parsing.
 
 set -euo pipefail
 
@@ -34,7 +29,6 @@ psql_db() {
   psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" "$@"
 }
 
-# Drop and recreate work database
 log "Preparing database $WORK_DB"
 psql_root -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$WORK_DB' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
 psql_root -c "DROP DATABASE IF EXISTS $WORK_DB;"
@@ -42,15 +36,12 @@ psql_root -c "CREATE DATABASE $WORK_DB;"
 
 apply_migrations_as() {
   local role_sql="$1"
-  # Stubs always as superuser first (roles + auth schema)
   psql_db -f "$STUBS_DIR/00_auth_and_roles.sql"
 
-  # Optional role setup for scenario
   if [[ -n "$role_sql" ]]; then
     psql_db -c "$role_sql"
   fi
 
-  # Apply 001–008
   local f
   for f in \
     001_initial_multitenant.sql \
@@ -90,70 +81,57 @@ verify_post_008() {
   [[ "$schema_owner" != "anon" && "$schema_owner" != "authenticated" ]] || fail "private schema owned by API role: $schema_owner"
   pass "private schema owner=$schema_owner"
 
+  # Diagnostic dump of function attributes
+  local fn_dump
+  fn_dump=$(psql_db -Atc "SELECT n.nspname||'.'||p.proname||' prosecdef='||p.prosecdef::text||' proconfig='||coalesce(array_to_string(p.proconfig,';'),'<null>')||' prolang='||l.lanname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname='private' AND p.proname='user_organization_ids';")
+  log "fn_dump: ${fn_dump:-EMPTY}"
+  [[ -n "$fn_dump" ]] || fail "private.user_organization_ids does not exist"
+
   local is_definer
-  is_definer=$(psql_db -Atc "
-    SELECT p.prosecdef::text
-    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'private' AND p.proname = 'user_organization_ids';
-  ")
-  [[ "$is_definer" == "t" ]] || fail "private.user_organization_ids is not SECURITY DEFINER"
+  is_definer=$(psql_db -Atc "SELECT p.prosecdef FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='private' AND p.proname='user_organization_ids';")
+  # trim whitespace
+  is_definer=$(echo "$is_definer" | tr -d '[:space:]')
+  [[ "$is_definer" == "t" || "$is_definer" == "true" ]] || fail "private.user_organization_ids is not SECURITY DEFINER (got='$is_definer')"
   pass "private.user_organization_ids is SECURITY DEFINER"
 
   local search_path_cfg
-  search_path_cfg=$(psql_db -Atc "
-    SELECT coalesce(array_to_string(p.proconfig, ','), '')
-    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'private' AND p.proname = 'user_organization_ids';
-  ")
+  search_path_cfg=$(psql_db -Atc "SELECT coalesce(array_to_string(p.proconfig, ','), '') FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='private' AND p.proname='user_organization_ids';")
   echo "$search_path_cfg" | grep -q "search_path=" || fail "search_path not set on private.user_organization_ids (got: $search_path_cfg)"
   pass "private.user_organization_ids has search_path config ($search_path_cfg)"
 
   local pub_count
-  pub_count=$(psql_db -Atc "
-    SELECT count(*) FROM pg_proc p
-    JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public'
-      AND p.proname IN ('user_organization_ids', 'user_active_organization_ids');
-  ")
+  pub_count=$(psql_db -Atc "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('user_organization_ids','user_active_organization_ids');")
+  pub_count=$(echo "$pub_count" | tr -d '[:space:]')
   [[ "$pub_count" == "0" ]] || fail "public helper functions still exist (count=$pub_count)"
   pass "public.user_organization_ids and public.user_active_organization_ids dropped"
 
   local pol_count
-  pol_count=$(psql_db -Atc "
-    SELECT count(*) FROM pg_policies
-    WHERE schemaname = 'public'
-      AND (
-        coalesce(qual, '') LIKE '%private.user_organization_ids%'
-        OR coalesce(with_check, '') LIKE '%private.user_organization_ids%'
-      );
-  ")
+  pol_count=$(psql_db -Atc "SELECT count(*) FROM pg_policies WHERE schemaname='public' AND (coalesce(qual,'') LIKE '%private.user_organization_ids%' OR coalesce(with_check,'') LIKE '%private.user_organization_ids%');")
+  pol_count=$(echo "$pol_count" | tr -d '[:space:]')
   [[ "$pol_count" -ge 2 ]] || fail "expected >=2 policies using private.user_organization_ids, got $pol_count"
   pass "policies reference private.user_organization_ids (count=$pol_count)"
 
   local inv_grants
-  inv_grants=$(psql_db -Atc "
-    SELECT
-      has_table_privilege('authenticated', 'public.organization_invitations', 'SELECT')::text || ',' ||
-      has_table_privilege('anon', 'public.organization_invitations', 'SELECT')::text;
-  ")
+  inv_grants=$(psql_db -Atc "SELECT has_table_privilege('authenticated','public.organization_invitations','SELECT')::text || ',' || has_table_privilege('anon','public.organization_invitations','SELECT')::text;")
+  inv_grants=$(echo "$inv_grants" | tr -d '[:space:]')
   [[ "$inv_grants" == "f,f" ]] || fail "organization_invitations still has SELECT for API roles: $inv_grants"
   pass "organization_invitations has no SELECT for authenticated/anon"
 
   local uid org_id
   uid=$(psql_db -Atc "INSERT INTO auth.users (email) VALUES ('verify@example.com') RETURNING id;")
   org_id=$(psql_db -Atc "INSERT INTO public.organizations (name) VALUES ('Verify Org') RETURNING id;")
-  psql_db -c "INSERT INTO public.organization_members (organization_id, user_id, role, status)
-              VALUES ('$org_id', '$uid', 'owner', 'active');" >/dev/null
+  psql_db -c "INSERT INTO public.organization_members (organization_id, user_id, role, status) VALUES ('$org_id', '$uid', 'owner', 'active');" >/dev/null
   psql_db -c "SELECT auth.set_test_uid('$uid'::uuid);" >/dev/null
 
   local returned
   returned=$(psql_db -Atc "SELECT private.user_organization_ids();")
+  returned=$(echo "$returned" | tr -d '[:space:]')
   [[ "$returned" == "$org_id" ]] || fail "helper returned '$returned', expected '$org_id'"
   pass "private.user_organization_ids returns active membership"
 
   local usage_auth usage_anon
-  usage_auth=$(psql_db -Atc "SELECT has_schema_privilege('authenticated', 'private', 'USAGE')::text;")
-  usage_anon=$(psql_db -Atc "SELECT has_schema_privilege('anon', 'private', 'USAGE')::text;")
+  usage_auth=$(psql_db -Atc "SELECT has_schema_privilege('authenticated','private','USAGE')::text;" | tr -d '[:space:]')
+  usage_anon=$(psql_db -Atc "SELECT has_schema_privilege('anon','private','USAGE')::text;" | tr -d '[:space:]')
   [[ "$usage_auth" == "t" ]] || fail "authenticated lacks USAGE on private"
   [[ "$usage_anon" == "f" ]] || fail "anon has USAGE on private (should not)"
   pass "schema private USAGE: authenticated=yes, anon=no"
