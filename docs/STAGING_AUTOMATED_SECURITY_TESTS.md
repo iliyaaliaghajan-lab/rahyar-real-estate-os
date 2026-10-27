@@ -2,25 +2,42 @@
 
 Opt-in runner: `scripts/staging-security-smoke.mjs`.
 
-It is **not** part of `npm test` or GitHub Actions. A normal push or pull request must not call it. The script mutates Staging: it creates disposable Auth users via Auth Admin APIs and organizations, then deletes only those objects. **It does not require pre-created Auth users.** Manual Dashboard users remain an option only for hand-run tests outside this runner.
+It is **not** part of `npm test` or the ordinary CI workflow. A normal push or pull request must not call the live suite. Optional GitHub Actions entry point: `.github/workflows/staging-security-smoke.yml` — **workflow_dispatch only**, Node.js **22**, Environment `etehad-staging-security`, branch pin to `feat/etehad-secure-invitations-and-rls`, and input `confirm_staging_run` (default **false**).
+
+The script mutates Staging: it creates disposable Auth users via Auth Admin APIs and organizations, then deletes only those objects. **It does not require pre-created Auth users.** Manual Dashboard users remain an option only for hand-run tests outside this runner.
+
+## Latest verified live run
+
+| Field | Value |
+|-------|--------|
+| GitHub Actions run | [40428548889](https://github.com/iliyaaliaghajan-lab/rahyar-real-estate-os/actions/runs/40428548889) |
+| HEAD tested | `e4bb442baffdde8db47bbdded8d5855aab1838f6` |
+| Event | `workflow_dispatch` with confirmation |
+| Runtime | Node.js 22.23.3 |
+| Target | pinned Staging `dezonafotwyvvghbccko` |
+| Runner run id | `89594cd043ef` |
+| Result | **success** — `pass=12` `fail=0` `skip=0` |
+| Cleanup | **CLEANUP OK** for that run id; follow-up operator query reported no leftover disposable orgs/users/invites for the same id |
+
+A green CI run on a **later** documentation-only commit does **not** re-prove this live result.
 
 ## What it checks
 
 Using disposable users (owner A, owner D, agent C, invitee B) and two organizations created through `create_organization_with_owner`:
 
-| ID | Check |
-|----|--------|
-| L1-owner / L1-agent | Direct `SELECT` on `organization_invitations` is an explicit permission denial. An empty result is a failure. |
-| S5 | Owner A cannot directly insert an organization. |
-| L2-C / L2-B | Owner A can create an `agent` invitation. |
-| L5a | A different authenticated email cannot accept C's invitation. |
-| L4-C / L4-B | The matching user accepts once and has an active membership in organization A. |
-| L3 | Agent C is rejected with an authorization error, not a session error. |
-| L5b | Reusing B's accepted token is rejected as already accepted. |
-| L6 | Owner A's successful reads of `organizations` and `organization_members` include organization A and never organization B. |
-| S6 | Owner A cannot directly update agent C's role. |
+| ID | Check | Latest live |
+|----|--------|-------------|
+| L1-owner / L1-agent | Direct `SELECT` on `organization_invitations` is an explicit permission denial. An empty result is a failure. | PASS |
+| S5 | Owner A cannot directly insert an organization. | PASS |
+| L2-C / L2-B | Owner A can create an `agent` invitation. | PASS |
+| L5a | A different authenticated email cannot accept C's invitation. | PASS |
+| L4-C / L4-B | The matching user accepts once and has an active membership in organization A. | PASS |
+| L3 | Agent C is rejected with an authorization error, not a session error. | PASS |
+| L5b | Reusing B's accepted token is rejected as already accepted. | PASS |
+| L6 | Owner A's successful reads of `organizations` and `organization_members` include organization A and never organization B. | PASS |
+| S6 | Owner A cannot directly update agent C's role. | PASS |
 
-Expiry, concurrency, migration 006, business tables, and browser UI flows are out of scope.
+**Out of scope for this runner (still not claimed):** invitation expiry, concurrency races, full browser UI flow, exhaustive business-table tenant matrix, and Security Advisor disposition for every `SECURITY DEFINER` function.
 
 ## Required environment
 
@@ -41,11 +58,13 @@ Never put the service-role key in a browser bundle or in any `NEXT_PUBLIC_*` var
 
 ## How to run
 
-In a trusted Codespace or shell, export the four variables from a secret store (not from chat, not from a committed file). Then:
+**Local / Codespace:** export the four variables from a secret store (not from chat, not from a committed file), then:
 
 ```bash
 npm run test:staging-security
 ```
+
+**GitHub Actions:** Actions → “Staging security smoke” → Run workflow on branch `feat/etehad-secure-invitations-and-rls` with `confirm_staging_run` set to **true**. Do not re-run without a specific need.
 
 ## How to read the output
 
@@ -60,4 +79,4 @@ npm run test:staging-security
 
 The runner does not print emails, keys, session tokens, magic-link hashes, or invitation tokens.
 
-Live scenarios stay **not executed** until this command is run against Staging and the summary shows passes. A green `npm test` only proves this file's static contract.
+A green `npm test` only proves the static contract tests for the runner script, not live Staging behavior.
