@@ -25,6 +25,11 @@ norm_bool() {
   esac
 }
 
+# Extract first UUID from psql output (handles accidental INSERT tags / notices).
+extract_uuid() {
+  echo "$1" | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1
+}
+
 psql_root() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$ROOT_DB" "$@"; }
 psql_db() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" "$@"; }
 
@@ -154,18 +159,24 @@ verify_post_008_positive() {
   [[ "$inv_a" == "f" && "$inv_b" == "f" ]] || fail "invitations SELECT leak: $inv_a,$inv_b"
   pass "organization_invitations locked"
 
-  local new_uid profile_count_after
-  new_uid=$(psql_db -Atc "INSERT INTO auth.users (email, raw_user_meta_data) VALUES ('trigger-check@example.com', '{\"full_name\":\"T\"}'::jsonb) RETURNING id;" | tr -d '[:space:]')
+  local new_uid profile_count_after raw
+  raw=$(psql_db -Atc "INSERT INTO auth.users (email, raw_user_meta_data) VALUES ('trigger-check@example.com', '{\"full_name\":\"T\"}'::jsonb) RETURNING id;")
+  new_uid=$(extract_uuid "$raw")
+  [[ -n "$new_uid" ]] || fail "could not parse uuid from auth insert: $raw"
   profile_count_after=$(psql_db -Atc "SELECT count(*) FROM public.profiles WHERE id = '$new_uid';" | tr -d '[:space:]')
-  [[ "$profile_count_after" == "1" ]] || fail "auth.users trigger did not create profile"
+  [[ "$profile_count_after" == "1" ]] || fail "auth.users trigger did not create profile (count=$profile_count_after uid=$new_uid)"
   pass "auth.users trigger created profile"
 
   local uid org_id returned
-  uid=$(psql_db -Atc "INSERT INTO auth.users (email) VALUES ('verify@example.com') RETURNING id;" | tr -d '[:space:]')
-  org_id=$(psql_db -Atc "INSERT INTO public.organizations (name) VALUES ('Verify Org') RETURNING id;" | tr -d '[:space:]')
+  raw=$(psql_db -Atc "INSERT INTO auth.users (email) VALUES ('verify@example.com') RETURNING id;")
+  uid=$(extract_uuid "$raw")
+  raw=$(psql_db -Atc "INSERT INTO public.organizations (name) VALUES ('Verify Org') RETURNING id;")
+  org_id=$(extract_uuid "$raw")
+  [[ -n "$uid" && -n "$org_id" ]] || fail "smoke insert ids missing uid=$uid org=$org_id"
   psql_db -c "INSERT INTO public.organization_members (organization_id, user_id, role, status) VALUES ('$org_id', '$uid', 'owner', 'active');" >/dev/null
   psql_db -c "SELECT auth.set_test_uid('$uid'::uuid);" >/dev/null
   returned=$(psql_db -Atc "SELECT private.user_organization_ids();" | tr -d '[:space:]')
+  returned=$(extract_uuid "$returned")
   [[ "$returned" == "$org_id" ]] || fail "helper returned '$returned' expected '$org_id'"
   pass "helper returns active membership"
 
