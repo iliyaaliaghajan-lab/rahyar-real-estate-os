@@ -81,4 +81,14 @@ describe("staging security smoke runner contract", () => {
     const userLoop = runner.indexOf("for (const id of userIds)");
     assert.ok(orgBlock > 0 && userLoop > orgBlock, "user cleanup must follow org cleanup and run independently");
   });
+
+  it("includes I7 expiry and I10 concurrent-accept scenarios without printing tokens", () => {
+    assert.match(runner, /record\("I7"/);
+    assert.match(runner, /invitation expired/i);
+    assert.match(runner, /record\("I10"/);
+    assert.match(runner, /Promise\.all/);
+    assert.match(runner, /already accepted/i);
+    assert.doesNotMatch(executable, /console\.(log|error|info|debug)\([^)]*tokenE/i);
+    assert.doesNotMatch(executable, /console\.(log|error|info|debug)\([^)]*tokenF/i);
+  });
 });
