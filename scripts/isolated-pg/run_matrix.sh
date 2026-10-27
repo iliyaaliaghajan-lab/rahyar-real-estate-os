@@ -17,6 +17,15 @@ log() { printf '[%s][%s] %s\n' "$PG_VERSION" "$SCENARIO" "$*"; }
 pass() { log "PASS: $*"; }
 fail() { log "FAIL: $*"; exit 1; }
 
+# Normalize PG boolean text to t/f
+norm_bool() {
+  case "$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+    t|true) echo t ;;
+    f|false) echo f ;;
+    *) echo "$1" ;;
+  esac
+}
+
 psql_root() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$ROOT_DB" "$@"; }
 psql_db() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" "$@"; }
 
@@ -64,10 +73,8 @@ verify_post_008() {
 
   local definer_line
   definer_line=$(psql_db -Atc "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='private' AND p.proname='user_organization_ids';" || true)
-  log "fn_def_snippet: $(echo "$definer_line" | tr '\n' ' ' | head -c 200)"
   echo "$definer_line" | grep -qi "SECURITY DEFINER" || fail "private.user_organization_ids definition lacks SECURITY DEFINER"
   pass "private.user_organization_ids is SECURITY DEFINER"
-
   echo "$definer_line" | grep -q "search_path" || fail "search_path not in function definition"
   pass "private.user_organization_ids sets search_path"
 
@@ -81,9 +88,10 @@ verify_post_008() {
   [[ "$pol_count" -ge 2 ]] || fail "expected >=2 policies using private.user_organization_ids, got $pol_count"
   pass "policies reference private.user_organization_ids (count=$pol_count)"
 
-  local inv_grants
-  inv_grants=$(psql_db -Atc "SELECT has_table_privilege('authenticated','public.organization_invitations','SELECT')::text || ',' || has_table_privilege('anon','public.organization_invitations','SELECT')::text;" | tr -d '[:space:]')
-  [[ "$inv_grants" == "f,f" ]] || fail "organization_invitations still has SELECT for API roles: $inv_grants"
+  local inv_a inv_b
+  inv_a=$(norm_bool "$(psql_db -Atc "SELECT has_table_privilege('authenticated','public.organization_invitations','SELECT');")")
+  inv_b=$(norm_bool "$(psql_db -Atc "SELECT has_table_privilege('anon','public.organization_invitations','SELECT');")")
+  [[ "$inv_a" == "f" && "$inv_b" == "f" ]] || fail "organization_invitations still has SELECT for API roles: $inv_a,$inv_b"
   pass "organization_invitations has no SELECT for authenticated/anon"
 
   local uid org_id
@@ -98,10 +106,10 @@ verify_post_008() {
   pass "private.user_organization_ids returns active membership"
 
   local usage_auth usage_anon
-  usage_auth=$(psql_db -Atc "SELECT has_schema_privilege('authenticated','private','USAGE')::text;" | tr -d '[:space:]')
-  usage_anon=$(psql_db -Atc "SELECT has_schema_privilege('anon','private','USAGE')::text;" | tr -d '[:space:]')
-  [[ "$usage_auth" == "t" ]] || fail "authenticated lacks USAGE on private"
-  [[ "$usage_anon" == "f" ]] || fail "anon has USAGE on private (should not)"
+  usage_auth=$(norm_bool "$(psql_db -Atc "SELECT has_schema_privilege('authenticated','private','USAGE');")")
+  usage_anon=$(norm_bool "$(psql_db -Atc "SELECT has_schema_privilege('anon','private','USAGE');")")
+  [[ "$usage_auth" == "t" ]] || fail "authenticated lacks USAGE on private (got $usage_auth)"
+  [[ "$usage_anon" == "f" ]] || fail "anon has USAGE on private (got $usage_anon)"
   pass "schema private USAGE: authenticated=yes, anon=no"
 }
 
