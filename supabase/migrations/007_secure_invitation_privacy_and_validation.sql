@@ -1,7 +1,7 @@
 -- ============================================================
 -- 007_secure_invitation_privacy_and_validation.sql
 -- Incremental hardening for organization invitations (after 005).
--- Does NOT rewrite 005. Staging: authored only — not applied.
+-- Definition of invitation privacy / create validation. Environment apply status: see docs/INVITATIONS.md and docs/STAGING_RLS_TEST_PLAN.md.
 -- ============================================================
 -- Goals:
 -- 1) Stop authenticated members from reading organization_invitations
