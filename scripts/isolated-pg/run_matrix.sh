@@ -395,6 +395,7 @@ case "$SCENARIO" in
       CREATE OR REPLACE FUNCTION public.m008_test_c_on_helper_create()
       RETURNS event_trigger
       LANGUAGE plpgsql
+      SECURITY DEFINER
       SET search_path = pg_catalog
       AS \$\$
       DECLARE
