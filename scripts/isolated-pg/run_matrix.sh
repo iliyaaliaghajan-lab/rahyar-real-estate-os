@@ -3,7 +3,8 @@
 # Positive: safe | create | setrole
 # Negative (expect SECURITY PREFLIGHT FAILED):
 #   neg_schema_owner_member  – API role inherits schema owner
-#   neg_function_owner_member – API role inherits/becomes function owner (schema owner distinct)
+#   neg_function_owner_member – API role inherits/becomes function owner (schema owner distinct; preflight A)
+#   neg_function_owner_preflight_c – post-create membership injection; exercises preflight C only
 #   neg_create_inherit       – API role obtains CREATE via role membership (USAGE/INHERIT)
 #   neg_create_setrole       – API role obtains CREATE via SET ROLE (PG16+) or MEMBER without inherit (PG15)
 # Never soft-fail security checks. Never use || true to hide expected failures.
@@ -101,18 +102,29 @@ apply_008() {
   fi
 }
 
+# Apply migration 008 expecting SECURITY PREFLIGHT FAILED.
+# Args: expected_snippet, role_mode [safe|create|setrole|fn_owner_c], optional required_fixture_marker
 expect_preflight_fail() {
   local expected_snippet="$1"
   local role_mode="${2:-safe}"
+  local required_marker="${3:-}"
   local out; out=$(mktemp)
   set +e
-  if [[ "$role_mode" == "setrole" ]]; then
-    { echo "SET ROLE custom_owner;"; cat "$MIGRATIONS_DIR/008_rls_helper_schema_and_profile_policy_optimization.sql"; echo "RESET ROLE;"; } | psql_db >"$out" 2>&1
-  elif [[ "$role_mode" == "create" ]]; then
-    { echo "SET SESSION AUTHORIZATION custom_owner;"; cat "$MIGRATIONS_DIR/008_rls_helper_schema_and_profile_policy_optimization.sql"; echo "RESET SESSION AUTHORIZATION;"; } | psql_db >"$out" 2>&1
-  else
-    psql_db -f "$MIGRATIONS_DIR/008_rls_helper_schema_and_profile_policy_optimization.sql" >"$out" 2>&1
-  fi
+  case "$role_mode" in
+    setrole)
+      { echo "SET ROLE custom_owner;"; cat "$MIGRATIONS_DIR/008_rls_helper_schema_and_profile_policy_optimization.sql"; echo "RESET ROLE;"; } | psql_db >"$out" 2>&1
+      ;;
+    create)
+      { echo "SET SESSION AUTHORIZATION custom_owner;"; cat "$MIGRATIONS_DIR/008_rls_helper_schema_and_profile_policy_optimization.sql"; echo "RESET SESSION AUTHORIZATION;"; } | psql_db >"$out" 2>&1
+      ;;
+    fn_owner_c)
+      # Run as fn_owner_c so CREATE FUNCTION yields that owner; event trigger then injects membership before preflight C.
+      { echo "SET ROLE fn_owner_c;"; cat "$MIGRATIONS_DIR/008_rls_helper_schema_and_profile_policy_optimization.sql"; echo "RESET ROLE;"; } | psql_db >"$out" 2>&1
+      ;;
+    *)
+      psql_db -f "$MIGRATIONS_DIR/008_rls_helper_schema_and_profile_policy_optimization.sql" >"$out" 2>&1
+      ;;
+  esac
   local rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then
@@ -120,6 +132,12 @@ expect_preflight_fail() {
     cat "$out" || true
     rm -f "$out"
     fail "008 succeeded but expected SECURITY PREFLIGHT FAILED ($expected_snippet)"
+  fi
+  if [[ -n "$required_marker" ]] && ! grep -q "$required_marker" "$out"; then
+    log "008 output (missing required fixture marker '$required_marker'):"
+    cat "$out" || true
+    rm -f "$out"
+    fail "required fixture marker '$required_marker' absent — preflight C injection did not run"
   fi
   if ! grep -q "SECURITY PREFLIGHT FAILED" "$out"; then
     log "008 output (missing SECURITY PREFLIGHT FAILED marker):"
@@ -134,6 +152,9 @@ expect_preflight_fail() {
     fail "SECURITY PREFLIGHT FAILED present, missing detail '$expected_snippet'"
   fi
   log "preflight message: $(grep -o 'SECURITY PREFLIGHT FAILED:.*' "$out" | head -1)"
+  if [[ -n "$required_marker" ]]; then
+    log "fixture marker confirmed: $required_marker"
+  fi
   rm -f "$out"
   pass "008 aborted with SECURITY PREFLIGHT FAILED containing: $expected_snippet"
 }
@@ -345,6 +366,75 @@ case "$SCENARIO" in
       pass "PG15 fixture: no effective CREATE; MEMBER of create_holder_set confirmed"
       expect_preflight_fail "can become role"
     fi
+    ;;
+
+  neg_function_owner_preflight_c)
+    # Goal: pass preflight A and B, create the helper as fn_owner_c, then inject
+    # API membership via a test-only ddl_command_end event trigger so preflight C fires.
+    apply_001_to_007 safe
+    ver=$(psql_db -Atc "SHOW server_version_num;" | tr -d '[:space:]')
+    psql_db -c "
+      -- Dedicated owner role: not granted to API roles before helper creation.
+      DO \$\$ BEGIN
+        CREATE ROLE fn_owner_c NOSUPERUSER NOBYPASSRLS NOLOGIN;
+      EXCEPTION WHEN duplicate_object THEN
+        ALTER ROLE fn_owner_c WITH NOSUPERUSER NOBYPASSRLS NOLOGIN;
+      END \$\$;
+      -- Current superuser must be able to SET ROLE during the migration apply.
+      GRANT fn_owner_c TO CURRENT_USER;
+      -- Schema exists and is owned by fn_owner_c; helper must NOT exist yet.
+      DROP FUNCTION IF EXISTS private.user_organization_ids();
+      CREATE SCHEMA IF NOT EXISTS private AUTHORIZATION fn_owner_c;
+      -- Ensure API roles have no membership path to fn_owner_c before migration.
+      REVOKE fn_owner_c FROM authenticated;
+      REVOKE fn_owner_c FROM anon;
+
+      -- Test-only event trigger: after private.user_organization_ids is created,
+      -- grant membership so preflight C sees an unsafe function-owner path.
+      CREATE OR REPLACE FUNCTION public.m008_test_c_on_helper_create()
+      RETURNS event_trigger
+      LANGUAGE plpgsql
+      SET search_path = pg_catalog
+      AS \$\$
+      DECLARE
+        r record;
+        ver integer := current_setting('server_version_num')::integer;
+        matched boolean := false;
+      BEGIN
+        FOR r IN
+          SELECT c.schema_name, c.object_identity, c.object_type, c.command_tag
+          FROM pg_catalog.pg_event_trigger_ddl_commands() AS c
+        LOOP
+          IF r.object_type = 'function'
+             AND (
+               (r.schema_name = 'private' AND position('user_organization_ids' in r.object_identity) > 0)
+               OR r.object_identity LIKE 'private.user_organization_ids%'
+             )
+          THEN
+            matched := true;
+            RAISE NOTICE 'M008_TEST_C_FIXTURE: granting fn_owner_c to authenticated after helper create (identity=%)',
+              r.object_identity;
+            IF ver >= 160000 THEN
+              EXECUTE 'GRANT fn_owner_c TO authenticated WITH INHERIT TRUE, SET TRUE';
+            ELSE
+              EXECUTE 'GRANT fn_owner_c TO authenticated';
+            END IF;
+          END IF;
+        END LOOP;
+        IF NOT matched THEN
+          RAISE NOTICE 'M008_TEST_C_FIXTURE: ddl_command_end saw no private.user_organization_ids create';
+        END IF;
+      END;
+      \$\$;
+
+      DROP EVENT TRIGGER IF EXISTS m008_test_c_helper_created;
+      CREATE EVENT TRIGGER m008_test_c_helper_created
+        ON ddl_command_end
+        WHEN TAG IN ('CREATE FUNCTION')
+        EXECUTE FUNCTION public.m008_test_c_on_helper_create();
+    "
+    # C-specific diagnostic uses the USAGE/inherit wording from preflight C.
+    expect_preflight_fail "privileges of function owner" "fn_owner_c" "M008_TEST_C_FIXTURE"
     ;;
 
   *) fail "Unknown SCENARIO=$SCENARIO" ;;

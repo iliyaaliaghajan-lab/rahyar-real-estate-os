@@ -88,3 +88,15 @@ An opt-in runner exists at `scripts/staging-security-smoke.mjs` (`npm run test:s
 - Smoke success proves only the scenarios the runner asserts.
 - Catalog privilege checks and Security Advisor findings still need human review; intentional no-policy on invitations is by design after 007.
 - Do not treat Production as tested.
+
+## Migration 008 isolated verification (CI only)
+
+Migration 008 is verified on branch `verify/migration-008-isolated-postgres` using disposable Postgres containers only.
+
+- Baseline 21-cell run: [40606719695](https://github.com/iliyaaliaghajan-lab/rahyar-real-estate-os/actions/runs/40606719695) on `edc80ff` (passed).
+- Expanded matrix adds `neg_function_owner_preflight_c` (24 cells) plus a Node 22 static-contract job; the **latest expanded workflow run** is the authority for the current branch result.
+- Isolated CI does **not** connect to Staging/Production and does **not** apply migration 008 live.
+- Read-only inventory: `docs/MIGRATION_008_READ_ONLY_PREFLIGHT.sql` (not executed live by the isolated workflow).
+- Dashboard check required before any live apply: schema `private` must not appear under Project Settings → API → Exposed schemas.
+- Full narrative: `docs/MIGRATION_008_VERIFICATION.md`.
+
