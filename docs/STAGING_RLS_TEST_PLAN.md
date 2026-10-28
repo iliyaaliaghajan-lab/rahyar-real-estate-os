@@ -99,4 +99,3 @@ Migration 008 is verified on branch `verify/migration-008-isolated-postgres` usi
 - Read-only inventory: `docs/MIGRATION_008_READ_ONLY_PREFLIGHT.sql` (not executed live by the isolated workflow).
 - Dashboard check required before any live apply: schema `private` must not appear under Project Settings → API → Exposed schemas.
 - Full narrative: `docs/MIGRATION_008_VERIFICATION.md`.
-

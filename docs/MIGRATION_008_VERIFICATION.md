@@ -1,6 +1,7 @@
 # Migration 008 — Isolated verification status
 
-**Branch:** `verify/migration-008-isolated-postgres` only.  
+**Branch:** `verify/migration-008-isolated-postgres` only.
+
 **Migration file:** `supabase/migrations/008_rls_helper_schema_and_profile_policy_optimization.sql` (authored; not applied live by this work).
 
 ## What isolated CI proves
