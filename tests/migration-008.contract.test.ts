@@ -78,9 +78,10 @@ describe('migration 008 static contracts', () => {
       assert.match(sql, /DROP FUNCTION IF EXISTS public\.user_active_organization_ids\(\)/i);
     });
 
-  it('locks down organization_invitations SELECT for API roles',
+  it('locks down organization_invitations for API roles',
     () => {
-      assert.match(sql, /REVOKE SELECT ON public\.organization_invitations FROM authenticated/i);
-      assert.match(sql, /REVOKE SELECT ON public\.organization_invitations FROM anon/i);
+      // Migration uses REVOKE ALL (stronger than SELECT-only); accept either form.
+      assert.match(sql, /REVOKE (ALL|SELECT) ON (TABLE )?public\.organization_invitations FROM authenticated/i);
+      assert.match(sql, /REVOKE (ALL|SELECT) ON (TABLE )?public\.organization_invitations FROM anon/i);
     });
 });
