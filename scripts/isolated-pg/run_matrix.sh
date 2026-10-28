@@ -382,6 +382,7 @@ case "$SCENARIO" in
       END \$\$;
       -- Current superuser must be able to SET ROLE during the migration apply.
       GRANT fn_owner_c TO CURRENT_USER;
+      GRANT CREATE ON DATABASE $WORK_DB TO fn_owner_c;
       -- Schema exists and is owned by fn_owner_c; helper must NOT exist yet.
       DROP FUNCTION IF EXISTS private.user_organization_ids();
       CREATE SCHEMA IF NOT EXISTS private AUTHORIZATION fn_owner_c;
