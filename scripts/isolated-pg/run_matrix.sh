@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Isolated PostgreSQL matrix for migration 008.
-# Positive: safe | create | setrole
+# Positive: safe | create | setrole | tenant_isolation
 # Negative (expect SECURITY PREFLIGHT FAILED):
 #   neg_schema_owner_member  – API role inherits schema owner
 #   neg_function_owner_member – API role inherits/becomes function owner (schema owner distinct; preflight A)
@@ -437,6 +437,127 @@ case "$SCENARIO" in
     "
     # C-specific diagnostic uses the USAGE/inherit wording from preflight C.
     expect_preflight_fail "privileges of function owner" "fn_owner_c" "M008_TEST_C_FIXTURE"
+    ;;
+
+  tenant_isolation)
+    # Real RLS as role authenticated (not superuser). set_config in auth.set_test_uid
+    # is transaction-local, so identity and SET LOCAL ROLE share one transaction.
+    apply_001_to_007 safe
+    apply_008 safe
+    psql_db -v ON_ERROR_STOP=1 <<'SQL'
+DO $iso$
+DECLARE
+  uid_a uuid;
+  uid_b uuid;
+  org_a uuid;
+  org_b uuid;
+  t text;
+  id_a uuid;
+  id_b uuid;
+  ins uuid;
+  n int;
+  rls_on boolean;
+  tables text[] := ARRAY['properties', 'clients', 'needs', 'follow_ups', 'activities'];
+BEGIN
+  INSERT INTO auth.users (email) VALUES ('iso-a@example.com') RETURNING id INTO uid_a;
+  INSERT INTO auth.users (email) VALUES ('iso-b@example.com') RETURNING id INTO uid_b;
+  INSERT INTO public.organizations (name) VALUES ('Iso Org A') RETURNING id INTO org_a;
+  INSERT INTO public.organizations (name) VALUES ('Iso Org B') RETURNING id INTO org_b;
+  INSERT INTO public.organization_members (organization_id, user_id, role, status)
+  VALUES
+    (org_a, uid_a, 'owner', 'active'),
+    (org_b, uid_b, 'owner', 'active');
+
+  FOREACH t IN ARRAY tables LOOP
+    SELECT c.relrowsecurity
+      INTO rls_on
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = t;
+    IF rls_on IS NOT TRUE THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: RLS is not enabled', t;
+    END IF;
+
+    EXECUTE format('INSERT INTO public.%I (organization_id) VALUES ($1) RETURNING id', t)
+      INTO id_a USING org_a;
+    EXECUTE format('INSERT INTO public.%I (organization_id) VALUES ($1) RETURNING id', t)
+      INTO id_b USING org_b;
+
+    PERFORM auth.set_test_uid(uid_a);
+    EXECUTE 'SET LOCAL ROLE authenticated';
+
+    EXECUTE format('SELECT count(*) FROM public.%I WHERE id = $1', t) INTO n USING id_a;
+    IF n <> 1 THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: user A SELECT own row count=% (expected 1)', t, n;
+    END IF;
+
+    EXECUTE format('SELECT count(*) FROM public.%I WHERE id = $1', t) INTO n USING id_b;
+    IF n <> 0 THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: user A SELECT org B row count=% (expected 0)', t, n;
+    END IF;
+
+    EXECUTE format('UPDATE public.%I SET organization_id = $1 WHERE id = $2', t) USING org_a, id_a;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n <> 1 THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: user A UPDATE own row affected=% (expected 1)', t, n;
+    END IF;
+
+    EXECUTE format('UPDATE public.%I SET organization_id = $1 WHERE id = $2', t) USING org_b, id_b;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n <> 0 THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: user A UPDATE org B affected=% (expected 0)', t, n;
+    END IF;
+
+    EXECUTE format('DELETE FROM public.%I WHERE id = $1', t) USING id_b;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n <> 0 THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: user A DELETE org B affected=% (expected 0)', t, n;
+    END IF;
+
+    EXECUTE format('INSERT INTO public.%I (organization_id) VALUES ($1) RETURNING id', t)
+      USING org_a INTO ins;
+    IF ins IS NULL THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: user A INSERT own org returned null', t;
+    END IF;
+
+    BEGIN
+      EXECUTE format('INSERT INTO public.%I (organization_id) VALUES ($1)', t) USING org_b;
+      RAISE EXCEPTION 'tenant_isolation FAIL %: user A INSERT org B succeeded', t;
+    EXCEPTION
+      WHEN insufficient_privilege THEN
+        IF SQLERRM NOT ILIKE '%row-level security%' THEN
+          RAISE EXCEPTION 'tenant_isolation FAIL %: INSERT org B error was not RLS (%: %)', t, SQLSTATE, SQLERRM;
+        END IF;
+    END;
+
+    EXECUTE format('DELETE FROM public.%I WHERE id = $1', t) USING ins;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n <> 1 THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: user A DELETE own inserted row affected=% (expected 1)', t, n;
+    END IF;
+
+    EXECUTE 'RESET ROLE';
+
+    EXECUTE format(
+      'SELECT count(*) FROM public.%I WHERE id = $1 AND organization_id = $2', t
+    ) INTO n USING id_b, org_b;
+    IF n <> 1 THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: org B seed missing or mutated after user A (count=%)', t, n;
+    END IF;
+
+    EXECUTE format(
+      'SELECT count(*) FROM public.%I WHERE id = $1 AND organization_id = $2', t
+    ) INTO n USING id_a, org_a;
+    IF n <> 1 THEN
+      RAISE EXCEPTION 'tenant_isolation FAIL %: org A seed missing after allowed update (count=%)', t, n;
+    END IF;
+  END LOOP;
+
+  RAISE NOTICE 'tenant_isolation PASS tables=properties,clients,needs,follow_ups,activities';
+END;
+$iso$;
+SQL
+    pass "authenticated tenant isolation on five business tables"
     ;;
 
   *) fail "Unknown SCENARIO=$SCENARIO" ;;

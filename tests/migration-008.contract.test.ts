@@ -116,8 +116,10 @@ describe('isolated harness and workflow contracts', () => {
     assert.match(harness, /required fixture marker/);
   });
 
-  it('workflow matrix includes neg_function_owner_preflight_c', () => {
+  it('workflow matrix includes tenant_isolation and preflight C', () => {
     assert.match(workflow, /neg_function_owner_preflight_c/);
+    assert.match(workflow, /tenant_isolation/);
+    assert.match(harness, /tenant_isolation\)/);
     assert.match(workflow, /pg:\s*\[\s*"15"\s*,\s*"16"\s*,\s*"17"\s*\]/);
   });
 

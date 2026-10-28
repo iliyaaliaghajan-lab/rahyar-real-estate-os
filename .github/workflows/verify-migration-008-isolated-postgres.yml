@@ -30,6 +30,7 @@ jobs:
           - neg_function_owner_preflight_c
           - neg_create_inherit
           - neg_create_setrole
+          - tenant_isolation
     services:
       postgres:
         image: postgres:${{ matrix.pg }}
@@ -111,7 +112,7 @@ jobs:
           CONTRACTS_RESULT: ${{ needs.contracts.result }}
         run: |
           echo "Isolated Postgres verification for migration 008 finished."
-          echo "Positive: safe, create, setrole"
+          echo "Positive: safe, create, setrole, tenant_isolation"
           echo "Negative (expect SECURITY PREFLIGHT FAILED):"
           echo "  neg_schema_owner_member, neg_function_owner_member,"
           echo "  neg_function_owner_preflight_c (preflight C via event-trigger fixture),"
@@ -124,4 +125,4 @@ jobs:
             echo "FAIL: matrix or contracts job did not succeed"
             exit 1
           fi
-          echo "PASS: matrix (24 cells) and static contracts both succeeded"
+          echo "PASS: matrix (27 cells) and static contracts both succeeded"
