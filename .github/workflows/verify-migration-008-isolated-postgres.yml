@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - verify/migration-008-isolated-postgres
+      - verify/migration-008-isolated-postgres-recovered
   workflow_dispatch:
 
 concurrency:
