@@ -1,1 +1,2 @@
-PLACEHOLDER
+#!/usr/bin/env bash
+# SEE LOCAL ARTIFACTS - RESTORE NEEDED
