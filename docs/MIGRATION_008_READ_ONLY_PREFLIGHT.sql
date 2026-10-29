@@ -75,13 +75,13 @@ FROM (
   VALUES
     ('organizations'),
     ('profiles'),
-    'organization_members',
-    'organization_invitations',
-    'properties',
-    'clients',
-    'needs',
-    'follow_ups',
-    'activities'
+    ('organization_members'),
+    ('organization_invitations'),
+    ('properties'),
+    ('clients'),
+    ('needs'),
+    ('follow_ups'),
+    ('activities')
 ) AS t(table_name)
 CROSS JOIN (
   SELECT rolname FROM pg_catalog.pg_roles
