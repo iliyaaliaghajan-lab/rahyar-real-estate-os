@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Isolated RLS A/B/C attribution benchmark for Migration 008 (local GH Actions PG only).
+# Isolated RLS five-state attribution benchmark for Migration 008 (local GH Actions PG only).
 # States:
-#   A = baseline through 007 (existing policies)
-#   B = profile SELECT consolidation only (still public.user_active_organization_ids)
-#   C = full Migration 008
+#   A  = baseline through 007 (existing policies; direct auth.uid())
+#   B1 = two separate profile SELECT policies + scalar (SELECT auth.uid())
+#   B2 = one consolidated profile SELECT + direct auth.uid() + public.user_active_organization_ids()
+#   B3 = one consolidated profile SELECT + scalar (SELECT auth.uid()) + public.user_active_organization_ids()
+#   C  = full Migration 008 (private helper + consolidated scalar policy)
 # Never run against Supabase, Staging, or Production.
 set -euo pipefail
 
@@ -17,7 +19,9 @@ MIGRATIONS_DIR="${MIGRATIONS_DIR:-supabase/migrations}"
 STUBS_DIR="${STUBS_DIR:-scripts/isolated-pg}"
 OUT_DIR="${OUT_DIR:-/tmp/rls-bench-out}"
 BASE_DB="rahyar_bench_base"
-STATE_B_DB="rahyar_bench_state_b"
+STATE_B1_DB="rahyar_bench_state_b1"
+STATE_B2_DB="rahyar_bench_state_b2"
+STATE_B3_DB="rahyar_bench_state_b3"
 STATE_C_DB="rahyar_bench_post008"
 WARMUP="${WARMUP:-5}"
 RUNS="${RUNS:-25}"
@@ -29,7 +33,11 @@ esac
 if [[ -n "${DATABASE_URL:-}" || -n "${SUPABASE_URL:-}" || -n "${SUPABASE_DB_URL:-}" ]]; then
   echo "REFUSE: remote database env vars present" >&2; exit 2
 fi
-[[ "$BASE_DB" == "rahyar_bench_base" && "$STATE_B_DB" == "rahyar_bench_state_b" && "$STATE_C_DB" == "rahyar_bench_post008" ]] || {
+[[ "$BASE_DB" == "rahyar_bench_base" \
+  && "$STATE_B1_DB" == "rahyar_bench_state_b1" \
+  && "$STATE_B2_DB" == "rahyar_bench_state_b2" \
+  && "$STATE_B3_DB" == "rahyar_bench_state_b3" \
+  && "$STATE_C_DB" == "rahyar_bench_post008" ]] || {
   echo "REFUSE: unexpected database names" >&2; exit 2
 }
 
@@ -39,11 +47,13 @@ die() { log "FAIL: $*"; exit 1; }
 psql_root() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres "$@"; }
 psql_db() { local d="$1"; shift; psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$d" "$@"; }
 
+ALL_DBS=("$BASE_DB" "$STATE_B1_DB" "$STATE_B2_DB" "$STATE_B3_DB" "$STATE_C_DB")
+
 log "Dropping prior benchmark DBs (named only)"
-psql_root -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ('$BASE_DB','$STATE_B_DB','$STATE_C_DB') AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
-psql_root -c "DROP DATABASE IF EXISTS $BASE_DB;"
-psql_root -c "DROP DATABASE IF EXISTS $STATE_B_DB;"
-psql_root -c "DROP DATABASE IF EXISTS $STATE_C_DB;"
+psql_root -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ('$BASE_DB','$STATE_B1_DB','$STATE_B2_DB','$STATE_B3_DB','$STATE_C_DB') AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
+for d in "${ALL_DBS[@]}"; do
+  psql_root -c "DROP DATABASE IF EXISTS $d;"
+done
 psql_root -c "CREATE DATABASE $BASE_DB;"
 
 apply_through_007() {
@@ -103,10 +113,58 @@ END;
 ANALYZE;
 SEED
 
-log "Cloning baseline -> state B (profile policy consolidation only)"
-psql_root -c "CREATE DATABASE $STATE_B_DB TEMPLATE $BASE_DB;"
-log "Applying state-B DDL (profiles SELECT only; no private schema; no tenant policy changes)"
-psql_db "$STATE_B_DB" -v ON_ERROR_STOP=1 <<'STATE_B'
+# --- B1: two separate policies, scalar (SELECT auth.uid()) only ---
+log "Cloning baseline -> state B1 (separate policies + scalar auth.uid)"
+psql_root -c "CREATE DATABASE $STATE_B1_DB TEMPLATE $BASE_DB;"
+psql_db "$STATE_B1_DB" -v ON_ERROR_STOP=1 <<'STATE_B1'
+DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Users can view profiles in same organization" ON public.profiles;
+DROP POLICY IF EXISTS "Users can view profiles in their organizations" ON public.profiles;
+
+CREATE POLICY "Users can view own profile" ON public.profiles
+  FOR SELECT TO authenticated
+  USING (id = (SELECT auth.uid()));
+
+CREATE POLICY "Users can view profiles in same organization" ON public.profiles
+  FOR SELECT TO authenticated
+  USING (
+    id = (SELECT auth.uid())
+    OR id IN (
+      SELECT om.user_id FROM public.organization_members AS om
+      WHERE om.status = 'active'
+        AND om.organization_id IN (SELECT public.user_active_organization_ids())
+    )
+  );
+
+ANALYZE public.profiles;
+STATE_B1
+
+# --- B2: one consolidated policy, direct auth.uid() ---
+log "Cloning baseline -> state B2 (consolidated policy + direct auth.uid)"
+psql_root -c "CREATE DATABASE $STATE_B2_DB TEMPLATE $BASE_DB;"
+psql_db "$STATE_B2_DB" -v ON_ERROR_STOP=1 <<'STATE_B2'
+DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Users can view profiles in same organization" ON public.profiles;
+DROP POLICY IF EXISTS "Users can view profiles in their organizations" ON public.profiles;
+
+CREATE POLICY "Users can view accessible profiles" ON public.profiles
+  FOR SELECT TO authenticated
+  USING (
+    id = auth.uid()
+    OR id IN (
+      SELECT om.user_id FROM public.organization_members AS om
+      WHERE om.status = 'active'
+        AND om.organization_id IN (SELECT public.user_active_organization_ids())
+    )
+  );
+
+ANALYZE public.profiles;
+STATE_B2
+
+# --- B3: one consolidated policy, scalar (SELECT auth.uid()) ---
+log "Cloning baseline -> state B3 (consolidated policy + scalar auth.uid)"
+psql_root -c "CREATE DATABASE $STATE_B3_DB TEMPLATE $BASE_DB;"
+psql_db "$STATE_B3_DB" -v ON_ERROR_STOP=1 <<'STATE_B3'
 DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
 DROP POLICY IF EXISTS "Users can view profiles in same organization" ON public.profiles;
 DROP POLICY IF EXISTS "Users can view profiles in their organizations" ON public.profiles;
@@ -123,8 +181,9 @@ CREATE POLICY "Users can view accessible profiles" ON public.profiles
   );
 
 ANALYZE public.profiles;
-STATE_B
+STATE_B3
 
+# --- C: full Migration 008 ---
 log "Cloning baseline -> state C (full Migration 008)"
 psql_root -c "CREATE DATABASE $STATE_C_DB TEMPLATE $BASE_DB;"
 log "Applying migration 008 to state C only"
@@ -285,7 +344,15 @@ sql_own="SELECT id FROM public.profiles WHERE id = '$UID_HOT'::uuid"
 sql_pk="SELECT id, organization_id FROM public.properties WHERE id = '$PROP_ID'::uuid"
 sql_upd="UPDATE public.properties SET organization_id = organization_id WHERE id = '$PROP_ID'::uuid"
 
-for state_label in "state_a:$BASE_DB" "state_b:$STATE_B_DB" "state_c:$STATE_C_DB"; do
+STATES=(
+  "state_a:$BASE_DB"
+  "state_b1:$STATE_B1_DB"
+  "state_b2:$STATE_B2_DB"
+  "state_b3:$STATE_B3_DB"
+  "state_c:$STATE_C_DB"
+)
+
+for state_label in "${STATES[@]}"; do
   mode="${state_label%%:*}"
   db="${state_label##*:}"
   require_count "$mode profile_roster" "$(auth_count "$db" "SELECT count(*) FROM ($sql_roster) s")" "50"
@@ -294,29 +361,46 @@ for state_label in "state_a:$BASE_DB" "state_b:$STATE_B_DB" "state_c:$STATE_C_DB
   require_count "$mode update" "$(auth_count "$db" "WITH u AS (UPDATE public.properties SET organization_id = organization_id WHERE id = '$PROP_ID'::uuid RETURNING 1) SELECT count(*) FROM u")" "1"
 done
 
-ids_a=$(auth_query "$BASE_DB" "$sql_roster" | grep -E '^[0-9a-f-]{36}$' || true)
-ids_b=$(auth_query "$STATE_B_DB" "$sql_roster" | grep -E '^[0-9a-f-]{36}$' || true)
-ids_c=$(auth_query "$STATE_C_DB" "$sql_roster" | grep -E '^[0-9a-f-]{36}$' || true)
-[[ -n "$ids_a" ]] || die "roster empty under state A"
-[[ "$(id_hash "$ids_a")" == "$(id_hash "$ids_b")" ]] || die "roster id mismatch A vs B"
-[[ "$(id_hash "$ids_a")" == "$(id_hash "$ids_c")" ]] || die "roster id mismatch A vs C"
-log "Visibility parity OK across A/B/C (roster hash match, counts match)"
+declare -A ROSTER_HASH
+ref_hash=""
+for state_label in "${STATES[@]}"; do
+  mode="${state_label%%:*}"
+  db="${state_label##*:}"
+  ids=$(auth_query "$db" "$sql_roster" | grep -E '^[0-9a-f-]{36}$' || true)
+  [[ -n "$ids" ]] || die "roster empty under $mode"
+  h=$(id_hash "$ids")
+  ROSTER_HASH[$mode]="$h"
+  if [[ -z "$ref_hash" ]]; then
+    ref_hash="$h"
+  else
+    [[ "$h" == "$ref_hash" ]] || die "roster id mismatch $mode vs state_a"
+  fi
+done
+log "Visibility parity OK across A/B1/B2/B3/C (roster hash match, counts match)"
 
-safe_measure_record state_a "$BASE_DB" "profile_roster" "$sql_roster" 1 0 "yes"
-safe_measure_record state_b "$STATE_B_DB" "profile_roster" "$sql_roster" 1 0 "yes"
-safe_measure_record state_c "$STATE_C_DB" "profile_roster" "$sql_roster" 1 0 "yes"
-
-safe_measure_record state_a "$BASE_DB" "profile_own" "$sql_own" 1 0 "yes"
-safe_measure_record state_b "$STATE_B_DB" "profile_own" "$sql_own" 1 0 "yes"
-safe_measure_record state_c "$STATE_C_DB" "profile_own" "$sql_own" 1 0 "yes"
-
-safe_measure_record state_a "$BASE_DB" "pk_properties" "$sql_pk" 1 0 "yes"
-safe_measure_record state_b "$STATE_B_DB" "pk_properties" "$sql_pk" 1 0 "yes"
-safe_measure_record state_c "$STATE_C_DB" "pk_properties" "$sql_pk" 1 0 "yes"
-
-safe_measure_record state_a "$BASE_DB" "update_properties" "$sql_upd" 1 1 "rollback"
-safe_measure_record state_b "$STATE_B_DB" "update_properties" "$sql_upd" 1 1 "rollback"
-safe_measure_record state_c "$STATE_C_DB" "update_properties" "$sql_upd" 1 1 "rollback"
+# Sequential measurement (same proven order as prior 3-state runner; interleaving
+# across five DBs would require a larger redesign of measure()/RAW naming and is
+# not applied here to avoid risk).
+for state_label in "${STATES[@]}"; do
+  mode="${state_label%%:*}"
+  db="${state_label##*:}"
+  safe_measure_record "$mode" "$db" "profile_roster" "$sql_roster" 1 0 "yes"
+done
+for state_label in "${STATES[@]}"; do
+  mode="${state_label%%:*}"
+  db="${state_label##*:}"
+  safe_measure_record "$mode" "$db" "profile_own" "$sql_own" 1 0 "yes"
+done
+for state_label in "${STATES[@]}"; do
+  mode="${state_label%%:*}"
+  db="${state_label##*:}"
+  safe_measure_record "$mode" "$db" "pk_properties" "$sql_pk" 1 0 "yes"
+done
+for state_label in "${STATES[@]}"; do
+  mode="${state_label%%:*}"
+  db="${state_label##*:}"
+  safe_measure_record "$mode" "$db" "update_properties" "$sql_upd" 1 1 "rollback"
+done
 
 python3 - <<PY
 import json, glob, os, sys
@@ -351,20 +435,18 @@ for path in sorted(glob.glob(plan_dir + "/*.json")):
 if errors:
     print("SUMMARY_FAIL", errors, file=sys.stderr)
     sys.exit(1)
-required = [
-    "state_a_profile_roster.json", "state_b_profile_roster.json", "state_c_profile_roster.json",
-    "state_a_profile_own.json", "state_b_profile_own.json", "state_c_profile_own.json",
-    "state_a_pk_properties.json", "state_b_pk_properties.json", "state_c_pk_properties.json",
-]
+modes = ("state_a", "state_b1", "state_b2", "state_b3", "state_c")
+queries = ("profile_roster", "profile_own", "pk_properties")
+required = [f"{m}_{q}.json" for m in modes for q in queries]
 for n in required:
     if not os.path.isfile(os.path.join(plan_dir, n)):
         print("missing required plan", n, file=sys.stderr)
         sys.exit(1)
 summary = {
     "pg_version": "$PG_VERSION",
-    "experiment": "A_baseline_B_profile_consolidation_C_full_008",
+    "experiment": "A_baseline_B1_separate_scalar_B2_consol_direct_B3_consol_scalar_C_full_008",
     "dataset": {"orgs": $N_ORGS, "users": $N_USERS, "rows_per_table": $ROWS_PER_TABLE, "hot_orgs": $HOT_ORGS, "members_per_org": $N_USERS // $N_ORGS},
-    "methodology": {"warmup": $WARMUP, "runs": $RUNS},
+    "methodology": {"warmup": $WARMUP, "runs": $RUNS, "sampling": "sequential_per_state"},
     "fixture": {"org_hot": "$ORG_HOT", "uid_hot": "$UID_HOT", "prop_id": "$PROP_ID"},
     "plan_evidence": evidence,
 }
@@ -375,24 +457,37 @@ PY
 python3 - <<PY
 import csv, sys
 bad = []
+modes = {"state_a", "state_b1", "state_b2", "state_b3", "state_c"}
+queries = {"profile_roster", "profile_own", "pk_properties", "update_properties"}
+seen = set()
 with open("$CSV") as f:
     for row in csv.DictReader(f):
-        mode = row["mode"]
-        if mode in ("state_a", "state_b", "state_c"):
-            try:
-                e = float(row["median_exec_ms"]); p = float(row["median_plan_ms"])
-            except ValueError:
-                bad.append(row); continue
-            if e == 0 and p == 0:
-                bad.append(row)
-            if row["parity_ok"] not in ("yes", "rollback"):
-                bad.append(row)
+        mode, q = row["mode"], row["query"]
+        seen.add((mode, q))
+        if mode not in modes:
+            bad.append(row); continue
+        try:
+            e = float(row["median_exec_ms"]); p = float(row["median_plan_ms"])
+        except ValueError:
+            bad.append(row); continue
+        if e == 0 and p == 0:
+            bad.append(row)
+        if row["parity_ok"] not in ("yes", "rollback"):
+            bad.append(row)
+expected = {(m, q) for m in modes for q in queries}
+missing = expected - seen
+if missing:
+    print("CSV_FAIL missing rows", sorted(missing), file=sys.stderr)
+    sys.exit(1)
+if len(seen) != 20:
+    print("CSV_FAIL expected 20 rows got", len(seen), file=sys.stderr)
+    sys.exit(1)
 if bad:
     print("CSV_FAIL", bad, file=sys.stderr)
     sys.exit(1)
-print("CSV validation OK")
+print("CSV validation OK (20 rows, 5 states x 4 queries)")
 PY
 
 log "CSV written: $CSV"
 log "Summary written: $JSON_SUM"
-log "A/B/C ATTRIBUTION BENCHMARK COMPLETE"
+log "FIVE-STATE A/B1/B2/B3/C ATTRIBUTION BENCHMARK COMPLETE"
