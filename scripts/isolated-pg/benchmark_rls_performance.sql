@@ -1,0 +1,12 @@
+-- Query catalog for scripts/isolated-pg/benchmark_rls_performance.sh
+-- Not executed standalone. Synthetic data only; loopback Postgres only.
+--
+-- Modes: pre008_rls | post008_rls | control_explicit (diagnostic)
+-- Dataset defaults: 100 orgs, 5000 users (50/org), 100000 rows/table, 5 hot orgs ~60% rows.
+--
+-- list_*: SELECT id FROM public.<table> LIMIT 50;  -- under SET ROLE authenticated
+-- pk_properties: SELECT id, organization_id FROM public.properties WHERE id = :prop;
+-- profile_own: SELECT id FROM public.profiles WHERE id = :uid;
+-- profile_roster: SELECT id FROM public.profiles LIMIT 50;
+-- update_properties: UPDATE public.properties SET organization_id = organization_id WHERE id = :prop; -- ROLLBACK
+-- control list: same SELECT with explicit organization_id = :org_hot (superuser session)

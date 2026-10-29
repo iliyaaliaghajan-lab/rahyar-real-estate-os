@@ -1,0 +1,86 @@
+name: Benchmark Migration 008 RLS Performance
+
+# Disposable local Postgres only. No Supabase / Staging / Production.
+on:
+  push:
+    branches:
+      - verify/migration-008-isolated-postgres-recovered
+    paths:
+      - "scripts/isolated-pg/benchmark_rls_performance.sh"
+      - "scripts/isolated-pg/benchmark_rls_performance.sql"
+      - ".github/workflows/benchmark-migration-008-rls-performance.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: bench-008-rls-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: PG ${{ matrix.pg }} RLS bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["15", "16", "17"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 40); do
+            if pg_isready -h 127.0.0.1 -p 5432 -U postgres; then
+              echo "Postgres ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres did not become ready"
+          exit 1
+
+      - name: Install client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client python3
+
+      - name: Run isolated RLS performance benchmark
+        env:
+          PGHOST: "127.0.0.1"
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PG_VERSION: "${{ matrix.pg }}"
+          MIGRATIONS_DIR: supabase/migrations
+          STUBS_DIR: scripts/isolated-pg
+          OUT_DIR: ${{ runner.temp }}/rls-bench-out
+          WARMUP: "5"
+          RUNS: "25"
+        run: |
+          test "$PGHOST" = "127.0.0.1"
+          chmod +x scripts/isolated-pg/benchmark_rls_performance.sh
+          scripts/isolated-pg/benchmark_rls_performance.sh
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rls-bench-pg${{ matrix.pg }}
+          path: ${{ runner.temp }}/rls-bench-out/
+          if-no-files-found: warn
+          retention-days: 14
