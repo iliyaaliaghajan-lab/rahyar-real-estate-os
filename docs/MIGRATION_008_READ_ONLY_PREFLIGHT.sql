@@ -218,12 +218,16 @@ SELECT EXISTS (
   FROM information_schema.tables
   WHERE table_schema = 'supabase_migrations'
     AND table_name = 'schema_migrations'
-) AS supabase_schema_migrations_exists;
+) AS supabase_schema_migrations_exists \gset
 
+\if :supabase_schema_migrations_exists
 SELECT version, name, statements
 FROM supabase_migrations.schema_migrations
 ORDER BY version
 LIMIT 100;
+\else
+SELECT 'SKIPPED: supabase_migrations.schema_migrations does not exist' AS migration_history_status;
+\endif
 
 -- Manual Dashboard check (not queryable from SQL alone):
 -- Confirm schema "private" is absent from
