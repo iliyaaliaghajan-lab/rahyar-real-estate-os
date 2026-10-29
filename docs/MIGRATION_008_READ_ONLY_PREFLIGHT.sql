@@ -75,13 +75,13 @@ FROM (
   VALUES
     ('organizations'),
     ('profiles'),
-    ('organization_members'),
-    ('organization_invitations'),
-    ('properties'),
-    ('clients'),
-    ('needs'),
-    ('follow_ups'),
-    ('activities')
+    'organization_members',
+    'organization_invitations',
+    'properties',
+    'clients',
+    'needs',
+    'follow_ups',
+    'activities'
 ) AS t(table_name)
 CROSS JOIN (
   SELECT rolname FROM pg_catalog.pg_roles
@@ -153,12 +153,23 @@ FROM pg_catalog.pg_namespace AS n
 JOIN pg_catalog.pg_roles AS r ON r.oid = n.nspowner
 WHERE n.nspname = 'private';
 
-SELECT rolname,
-       has_schema_privilege(rolname, 'private', 'USAGE') AS has_usage,
-       has_schema_privilege(rolname, 'private', 'CREATE') AS has_create
-FROM pg_catalog.pg_roles
-WHERE rolname IN ('anon', 'authenticated', 'service_role')
-ORDER BY rolname;
+-- Keep the role inventory readable when schema private does not exist yet.
+-- NULL means the schema is absent; TRUE/FALSE means the privilege was evaluated.
+SELECT r.rolname,
+       CASE
+         WHEN n.oid IS NOT NULL
+           THEN pg_catalog.has_schema_privilege(r.rolname, n.oid, 'USAGE')
+         ELSE NULL
+       END AS has_usage,
+       CASE
+         WHEN n.oid IS NOT NULL
+           THEN pg_catalog.has_schema_privilege(r.rolname, n.oid, 'CREATE')
+         ELSE NULL
+       END AS has_create
+FROM pg_catalog.pg_roles AS r
+LEFT JOIN pg_catalog.pg_namespace AS n ON n.nspname = 'private'
+WHERE r.rolname IN ('anon', 'authenticated', 'service_role')
+ORDER BY r.rolname;
 
 -- Direct role membership edges involving schema private owner (when schema exists)
 SELECT m.roleid::regrole::text AS granted_role,
