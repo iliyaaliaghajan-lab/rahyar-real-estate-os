@@ -22,7 +22,8 @@ export function buildInviteAcceptUrl(origin: string, token: string): string {
 
 /**
  * Parse a single invitation token from a URL hash (with or without leading #).
- * Rejects missing, empty, duplicate, short, or non-alphanumeric tokens.
+ * Accepts exactly one fragment parameter named "token". Rejects extra keys,
+ * duplicates, empty/short/malformed values.
  */
 export function parseInviteTokenFromHash(hash: string): ParseInviteTokenResult {
   const raw = hash.startsWith('#') ? hash.slice(1) : hash;
@@ -35,6 +36,19 @@ export function parseInviteTokenFromHash(hash: string): ParseInviteTokenResult {
     params = new URLSearchParams(raw);
   } catch {
     return { ok: false, reason: 'malformed' };
+  }
+
+  // Canonical link is only `#token=…` — reject any additional fragment keys.
+  const keys = [...params.keys()];
+  if (keys.length === 0) {
+    return { ok: false, reason: 'missing' };
+  }
+  if (keys.some((k) => k !== 'token')) {
+    return { ok: false, reason: 'malformed' };
+  }
+  if (keys.length > 1) {
+    // Multiple `token` entries (duplicate keys).
+    return { ok: false, reason: 'duplicate' };
   }
 
   const values = params.getAll('token');
@@ -79,16 +93,15 @@ export function hasLegacyTokenQuery(search: string): boolean {
  * Same-origin relative path guard for login / auth callback `next` parameters.
  * Blocks open redirects and any path that would carry an invitation token in
  * query or fragment, including bounded multi-level URI decoding.
+ * If the path is still further-decodable after the max rounds, reject (fail closed).
  */
 export function safeNextPath(raw: string | null | undefined): string {
   if (!raw) return '/';
-  if (!raw.startsWith('/') || raw.startsWith('//')) return '/';
-  if (raw.includes('://')) return '/';
+  if (!isSafeRelativePath(raw)) return '/';
+  if (pathCarriesInviteToken(raw)) return '/';
 
   let current = raw;
   for (let round = 0; round < MAX_DECODE_ROUNDS; round++) {
-    if (pathCarriesInviteToken(current)) return '/';
-
     let decoded: string;
     try {
       decoded = decodeURIComponent(current);
@@ -96,12 +109,34 @@ export function safeNextPath(raw: string | null | undefined): string {
       // Malformed percent-encoding is not a usable redirect target.
       return '/';
     }
-    if (decoded === current) break;
+    if (decoded === current) {
+      // Fully decoded within the bound.
+      if (!isSafeRelativePath(current) || pathCarriesInviteToken(current)) return '/';
+      return raw;
+    }
+
     current = decoded;
+    // Re-check after every decode step.
+    if (!isSafeRelativePath(current) || pathCarriesInviteToken(current)) return '/';
   }
 
-  if (pathCarriesInviteToken(current)) return '/';
+  // Max rounds reached — if the string can still be decoded further, fail closed.
+  try {
+    const further = decodeURIComponent(current);
+    if (further !== current) return '/';
+  } catch {
+    return '/';
+  }
+
+  if (!isSafeRelativePath(current) || pathCarriesInviteToken(current)) return '/';
   return raw;
+}
+
+/** Same-origin relative path: starts with single `/`, no scheme, not protocol-relative. */
+function isSafeRelativePath(path: string): boolean {
+  if (!path.startsWith('/') || path.startsWith('//')) return false;
+  if (path.includes('://')) return false;
+  return true;
 }
 
 function pathCarriesInviteToken(path: string): boolean {

@@ -17,6 +17,15 @@ import {
 const SAMPLE =
   'a1b2c3d4e5f6789012345678abcdef01a1b2c3d4e5f6789012345678abcdef01'; // 64 hex chars
 
+/** Encode a string N times with encodeURIComponent. */
+function encodeTimes(value: string, times: number): string {
+  let out = value;
+  for (let i = 0; i < times; i++) {
+    out = encodeURIComponent(out);
+  }
+  return out;
+}
+
 describe('buildInviteAcceptUrl', () => {
   it('places token only in the fragment and never in the query', () => {
     const url = buildInviteAcceptUrl('https://example.com', SAMPLE);
@@ -49,10 +58,10 @@ describe('parseInviteTokenFromHash', () => {
     if (r.ok) assert.equal(r.token, SAMPLE);
   });
 
-  it('allows an extra non-token fragment parameter alongside a single token', () => {
+  it('rejects additional fragment parameters (canonical link is only token)', () => {
     const r = parseInviteTokenFromHash(`#token=${SAMPLE}&src=invite`);
-    assert.equal(r.ok, true);
-    if (r.ok) assert.equal(r.token, SAMPLE);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.reason, 'malformed');
   });
 
   it('rejects missing token', () => {
@@ -61,7 +70,7 @@ describe('parseInviteTokenFromHash', () => {
     assert.equal(parseInviteTokenFromHash('#foo=bar').ok, false);
     const r = parseInviteTokenFromHash('#foo=bar');
     assert.equal(r.ok, false);
-    if (!r.ok) assert.equal(r.reason, 'missing');
+    if (!r.ok) assert.equal(r.reason, 'malformed');
   });
 
   it('rejects short tokens', () => {
@@ -80,6 +89,11 @@ describe('parseInviteTokenFromHash', () => {
     const r = parseInviteTokenFromHash(`#token=${SAMPLE}&token=${SAMPLE}`);
     assert.equal(r.ok, false);
     if (!r.ok) assert.equal(r.reason, 'duplicate');
+  });
+
+  it('rejects empty token values', () => {
+    const r = parseInviteTokenFromHash('#token=');
+    assert.equal(r.ok, false);
   });
 });
 
@@ -137,6 +151,21 @@ describe('safeNextPath', () => {
     const double = encodeURIComponent(encodeURIComponent(`/invite/accept?token=${SAMPLE}`));
     assert.equal(safeNextPath(`/${double}`), '/');
     assert.equal(safeNextPath(`/invite/accept%253Ftoken%253D${SAMPLE}`), '/');
+  });
+
+  it('rejects token-bearing paths encoded four, five, and six times (fail closed past bound)', () => {
+    const target = `/invite/accept?token=${SAMPLE}`;
+    for (const times of [4, 5, 6]) {
+      const encoded = encodeTimes(target, times);
+      assert.equal(safeNextPath(`/${encoded}`), '/', `expected reject after ${times} encodings`);
+      assert.equal(safeNextPath(encoded.startsWith('/') ? encoded : `/${encoded}`), '/');
+    }
+  });
+
+  it('rejects encoded protocol-relative destinations', () => {
+    assert.equal(safeNextPath(`/${encodeURIComponent('//evil.example')}`), '/');
+    assert.equal(safeNextPath(`/${encodeTimes('//evil.example/phish', 2)}`), '/');
+    assert.equal(safeNextPath(`/${encodeTimes('//evil.example', 3)}`), '/');
   });
 
   it('rejects nested next values that smuggle a token', () => {
