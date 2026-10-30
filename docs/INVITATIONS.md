@@ -6,9 +6,39 @@
 - RPC `create_organization_invitation(p_email, p_role)` — owner/admin only; role `admin` or `agent` only
 - RPC `accept_organization_invitation(p_token)` — authenticated user; email must match; single-use; 7-day expiry
 - UI `/team/invite` — persists invite, shows **copyable link** (does **not** send email)
-- UI `/invite/accept?token=…` — accept after login; preserves token via `next`
+- UI `/invite/accept#token=…` — token in **URL fragment only**; accept after login
 - Migration **006** — FK covering indexes on invitations; `create_organization_with_owner` rejects callers who already have an active membership
 - Migration **007** — revoke direct SELECT on invitations; drop member view policy; create pre-checks aligned with accept
+
+## Invitation link format (token transport)
+
+**Canonical shareable URL:** `/invite/accept#token=<raw-token>`
+
+- The token is placed in the **URL fragment** (`#token=…`), not the query string.
+- Fragments are not transmitted in the initial HTTP request to the server, so they do not appear in ordinary server/proxy access logs for that first navigation.
+- On the accept page the client:
+  1. Reads `window.location.hash`
+  2. Immediately clears the fragment (and any query string) with `history.replaceState`, preserving Next.js history state
+  3. Keeps the token only in component memory while calling `accept_organization_invitation`
+- The token is **never** written into `next`, login URLs, OTP `emailRedirectTo`, or `/auth/callback` query parameters.
+- **No `localStorage` or `sessionStorage` handoff** is used. If the recipient is unauthenticated, they are sent to `/login` without a token-bearing redirect. After successful login they must **reopen the original invitation link**.
+
+### Legacy query-format links
+
+Older links of the form `/invite/accept?token=…` are rejected:
+
+- The presence of a legacy `token` query parameter is detected without using its value.
+- The query string is cleared from the visible URL.
+- `accept_organization_invitation` is **not** called with a legacy query token.
+- The user is told (in Persian) that the link uses the old format and the inviter must create and send a new link.
+
+**Important:** the initial browser request for a legacy query-format link has already reached the server with its query string. Client-side cleanup cannot erase or prevent any historical server/proxy logging of that initial request. New invitations must use the fragment form exclusively.
+
+### Limits of this protection
+
+- Same-origin XSS can still read the fragment before it is cleared, or observe in-memory values. This URL-format change does **not** protect against XSS.
+- Browser history may briefly contain the fragment until cleanup runs.
+- Invitation expiry, single-use semantics, and RPC authorization are unchanged.
 
 ## Verification status (keep these separate)
 
@@ -101,9 +131,10 @@ Must return zero rows or the partial unique index fails.
 ## Security notes
 
 - Raw token returned **once** from create RPC; only `token_hash` stored
+- Shareable links use `#token=…` (fragment); query-string tokens are rejected as legacy
 - No `owner` role via invite (CHECK + function guard)
 - Membership write via DEFINER functions only; no client INSERT grants on members
-- Login/callback `next` must be a relative path (open-redirect blocked)
+- Login/callback `next` must be a relative path (open-redirect blocked) and must not carry invitation tokens
 - Advisor may flag `SECURITY DEFINER` + `EXECUTE` for `authenticated` on app RPCs and RLS helpers — expected for this design; do not revoke without breaking RLS
 - After 007: authenticated clients cannot `SELECT` invitation rows directly (supported by catalog checks and by live smoke L1)
 
