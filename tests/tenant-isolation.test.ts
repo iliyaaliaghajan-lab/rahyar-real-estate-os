@@ -25,9 +25,9 @@ function readRepo(relativePath: string): string {
   return readFileSync(join(root, relativePath), 'utf8');
 }
 
-const sql001 = readRepo('supabase/migrations/001_initial_multitenant.sql');
-const sql003 = readRepo('supabase/migrations/003_secure_org_policies.sql');
-const sql004 = readRepo('supabase/migrations/004_default_privs_and_profile.sql');
+const sql001 = readRepo('supabase/migrations/20261022230848_initial_multitenant.sql');
+const sql003 = readRepo('supabase/migrations/20261022230904_secure_org_policies.sql');
+const sql004 = readRepo('supabase/migrations/20261022230911_default_privs_and_profile.sql');
 const loginSrc = readRepo('src/app/login/page.tsx');
 const callbackSrc = readRepo('src/app/auth/callback/route.ts');
 const onboardingSrc = readRepo('src/app/onboarding/page.tsx');
