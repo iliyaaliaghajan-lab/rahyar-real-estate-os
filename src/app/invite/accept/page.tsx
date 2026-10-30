@@ -1,42 +1,112 @@
 'use client';
 
-import { useEffect, useMemo, useState, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useEffect, useRef, useState, Suspense } from 'react';
+import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import {
+  hasLegacyTokenQuery,
+  parseInviteTokenFromHash,
+} from '@/lib/auth/inviteUrl';
 import { Button, Card, Callout, PageHeader } from '@/components/ui';
+
+type AcceptStatus =
+  | 'checking'
+  | 'need_login'
+  | 'working'
+  | 'done'
+  | 'error'
+  | 'legacy';
+
+/**
+ * Capture outcome of the one-time URL read. Survives React 18 Strict Mode
+ * effect cleanup/replay without putting the token back into the URL or into
+ * browser web storage APIs.
+ */
+type CaptureState =
+  | { kind: 'unset' }
+  | { kind: 'legacy' }
+  | { kind: 'invalid'; reason: 'missing' | 'malformed' | 'too_short' | 'duplicate' }
+  | { kind: 'ready'; token: string };
 
 function AcceptInviteInner() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const token = useMemo(() => searchParams.get('token')?.trim() ?? '', [searchParams]);
-
-  const [status, setStatus] = useState<'checking' | 'need_login' | 'working' | 'done' | 'error'>(
-    'checking',
-  );
+  const [status, setStatus] = useState<AcceptStatus>('checking');
   const [message, setMessage] = useState<string | null>(null);
   const [orgName, setOrgName] = useState<string | null>(null);
+
+  // Component-local only — not persisted to browser storage.
+  const captureRef = useRef<CaptureState>({ kind: 'unset' });
 
   useEffect(() => {
     let cancelled = false;
 
-    async function run() {
-      if (!token || token.length < 32) {
-        setStatus('error');
-        setMessage('لینک دعوت نامعتبر است.');
-        return;
+    // First effect run (or first run after mount): read URL once, clear it,
+    // and stash the result in the ref so Strict Mode replay still has the token.
+    if (captureRef.current.kind === 'unset') {
+      const hash = typeof window !== 'undefined' ? window.location.hash : '';
+      const search = typeof window !== 'undefined' ? window.location.search : '';
+
+      // Clear fragment + query before any network call; preserve Next history state.
+      if (typeof window !== 'undefined') {
+        const pathOnly = window.location.pathname;
+        window.history.replaceState(window.history.state, '', pathOnly);
       }
 
+      if (hasLegacyTokenQuery(search)) {
+        captureRef.current = { kind: 'legacy' };
+      } else {
+        const parsed = parseInviteTokenFromHash(hash);
+        if (!parsed.ok) {
+          captureRef.current = { kind: 'invalid', reason: parsed.reason };
+        } else {
+          captureRef.current = { kind: 'ready', token: parsed.token };
+        }
+      }
+    }
+
+    const capture = captureRef.current;
+
+    if (capture.kind === 'legacy') {
+      setStatus('legacy');
+      setMessage(
+        'این لینک دعوت با قالب قدیمی ساخته شده است. لطفاً از دعوت‌کننده بخواهید لینک جدیدی ارسال کند.',
+      );
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (capture.kind !== 'ready') {
+      setStatus('error');
+      if (capture.kind === 'invalid' && capture.reason === 'missing') {
+        setMessage(
+          'لینک دعوت یافت نشد. پس از ورود، لینک اصلی دعوت را از ایمیل یا پیام دعوت‌کننده دوباره باز کنید.',
+        );
+      } else {
+        setMessage('لینک دعوت نامعتبر است.');
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // Token only in the ref + this closure — never re-inserted into a URL.
+    const token = capture.token;
+
+    async function run() {
       const supabase = createClient();
       const {
         data: { user },
       } = await supabase.auth.getUser();
 
+      if (cancelled) return;
+
       if (!user) {
-        if (!cancelled) setStatus('need_login');
+        setStatus('need_login');
         return;
       }
 
-      if (!cancelled) setStatus('working');
+      setStatus('working');
 
       const { data, error } = await supabase.rpc('accept_organization_invitation', {
         p_token: token,
@@ -59,11 +129,11 @@ function AcceptInviteInner() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, []);
 
   function goLogin() {
-    const next = `/invite/accept?token=${encodeURIComponent(token)}`;
-    router.replace(`/login?next=${encodeURIComponent(next)}`);
+    // No token in next, query, or fragment — user must reopen the original invite link after login.
+    router.replace('/login');
   }
 
   return (
@@ -80,10 +150,12 @@ function AcceptInviteInner() {
           {status === 'need_login' && (
             <>
               <Callout tone="error">
-                برای پذیرش دعوت باید با همان ایمیل دعوت‌شده وارد شوید.
+                برای پذیرش دعوت باید با همان ایمیل دعوت‌شده وارد شوید. پس از تکمیل ورود،{' '}
+                <strong>همین لینک دعوت را دوباره باز کنید</strong> (لینک اصلی که برای شما ارسال
+                شده است).
               </Callout>
               <Button className="w-full" onClick={goLogin}>
-                ورود و بازگشت به دعوت
+                ورود
               </Button>
             </>
           )}
@@ -94,6 +166,14 @@ function AcceptInviteInner() {
               </Callout>
               <Button className="w-full" onClick={() => router.replace('/')}>
                 ورود به داشبورد
+              </Button>
+            </>
+          )}
+          {status === 'legacy' && (
+            <>
+              <Callout tone="error">{message}</Callout>
+              <Button className="w-full" variant="secondary" onClick={() => router.replace('/')}>
+                بازگشت
               </Button>
             </>
           )}
