@@ -3,15 +3,8 @@
 import { Suspense, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { safeNextPath } from '@/lib/auth/inviteUrl';
 import { Button, Card, Callout, Field, Input, PageHeader } from '@/components/ui';
-
-/** Only allow same-origin relative paths (no open redirect). */
-function safeNextPath(raw: string | null): string {
-  if (!raw) return '/';
-  if (!raw.startsWith('/') || raw.startsWith('//')) return '/';
-  if (raw.includes('://')) return '/';
-  return raw;
-}
 
 function LoginForm() {
   const searchParams = useSearchParams();
@@ -27,6 +20,7 @@ function LoginForm() {
     setMessage(null);
 
     const supabase = createClient();
+    // nextPath is already sanitized; it never carries an invitation token.
     const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextPath)}`;
 
     const { error } = await supabase.auth.signInWithOtp({
