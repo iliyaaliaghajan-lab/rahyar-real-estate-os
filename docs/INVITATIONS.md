@@ -57,7 +57,7 @@ Older links of the form `/invite/accept?token=…` are rejected:
 
 ## Migration 007 (present in Staging history; authored in repo)
 
-File: `supabase/migrations/007_secure_invitation_privacy_and_validation.sql`
+File: `supabase/migrations/20261026115345_secure_invitation_privacy_and_validation.sql`
 
 - Revokes **all** direct privileges on `organization_invitations` from `PUBLIC`, `anon`, and `authenticated`.
 - Drops policy `Members can view org invitations`.
@@ -116,17 +116,27 @@ Must return zero rows or the partial unique index fails.
 - Multi-organization membership UX (index would need revisiting)
 - Live tests for concurrency, expiry, full browser path, and exhaustive business-table isolation
 
-## Migration order (repository file order)
+## Migration order (canonical repository timestamps)
 
-1. `001_initial_multitenant.sql`
-2. `002_business_tables_rls.sql`
-3. `003_secure_org_policies.sql`
-4. `004_default_privs_and_profile.sql` (optional profile trigger)
-5. `005_organization_invitations.sql` — requires `extensions.digest` (pgcrypto)
-6. `006_invite_fk_indexes_and_single_org_create.sql` — after 005
-7. `007_secure_invitation_privacy_and_validation.sql` — after 005
+Executable files under `supabase/migrations/` use timestamp prefixes that match
+Staging `schema_migrations` chronology:
 
-**Staging history note:** on `etehad-staging`, **006 was applied after 007**. That order differs from the repository numbering; the history was preserved rather than rewritten. Prefer applying 006 before 007 on new environments.
+1. `20261022230848_initial_multitenant.sql`
+2. `20261022230858_business_tables_rls.sql`
+3. `20261022230904_secure_org_policies.sql`
+4. `20261022230911_default_privs_and_profile.sql`
+5. `20261022230925_organization_invitations.sql` — requires `extensions.digest` (pgcrypto)
+6. `20261026115345_secure_invitation_privacy_and_validation.sql` (**007** — recorded **before** 006 on Staging)
+7. `20261027003152_invite_fk_indexes_and_single_org_create.sql` (**006**)
+8. `20261029181022_rls_helper_schema_and_profile_policy_optimization.sql` (**008**)
+
+**Staging history note:** on `etehad-staging`, version `20261026115345` (007) was
+applied **before** `20261027003152` (006). The canonical timestamp filenames
+preserve that recorded order. Both 006 and 007 depend on 005 (organization
+invitations). Static SQL review found **no hard object dependency** between 006
+and 007 (neither references objects created only by the other). New environments
+should follow the timestamp order so repository order matches Staging chronology.
+Do **not** prefer sequential numbering that would reverse 006/007 relative to history.
 
 ## Security notes
 

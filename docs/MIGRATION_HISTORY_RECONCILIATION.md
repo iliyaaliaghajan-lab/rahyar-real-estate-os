@@ -1,8 +1,10 @@
 # Migration history reconciliation
 
-This document proposes aligning Git migration **filenames** with the **versions
-observed in Staging** (`supabase_migrations.schema_migrations`). It does **not**
-apply, repair, or re-run any migration on a remote database.
+This document records the alignment of Git migration **filenames** with the
+**versions observed in Staging** (`supabase_migrations.schema_migrations`).
+The integration tree keeps **only** the timestamp-prefixed executable files
+listed below. It does **not** apply, repair, or re-run any migration on a
+remote database. Production history remains unverified.
 
 ## Why timestamp filenames
 
@@ -35,7 +37,7 @@ Order is the remote `version` order (not sequential filename order):
 dependency between 006 and 007 (both depend on 005). This PR preserves the
 observed remote chronology via filename timestamps.
 
-## Filename mapping (proposed Git layout)
+## Filename mapping (canonical Git layout on this integration branch)
 
 | Old sequential path | New path on this branch |
 |---------------------|-------------------------|
@@ -119,8 +121,8 @@ target a linked remote project.
 
 ## Relationship to other Draft PRs
 
-- **PR #1** carries sequential `005`–`007` and invitation/security work.
-- **PR #2** registers sequential `008` plus a Staging status note.
+- **PR #1** originated sequential `005`–`007` and invitation/security application work (integrated here with timestamp paths).
+- **PR #2** registered sequential `008` plus a Staging status note (status doc retained; sequential `008` file not kept).
 - **This PR** proposes a single ordered, timestamp-prefixed chain suitable for
   CLI version matching with observed Staging history.
 
