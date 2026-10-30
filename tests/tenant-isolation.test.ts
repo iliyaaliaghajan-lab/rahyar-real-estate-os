@@ -373,9 +373,22 @@ describe('app signup / onboarding / invite sources (static)', () => {
     assert.doesNotMatch(inviteSrc, /لینک ورود به ایمیل شما ارسال شد/);
   });
 
+  it('invite link uses fragment token, not query token', () => {
+    assert.match(inviteSrc, /buildInviteAcceptUrl/);
+    assert.doesNotMatch(inviteSrc, /\/invite\/accept\?token=/);
+  });
+
   it('accept page calls accept_organization_invitation with token', () => {
     assert.match(acceptSrc, /accept_organization_invitation/);
     assert.match(acceptSrc, /p_token/);
+    assert.match(acceptSrc, /parseInviteTokenFromHash/);
+    assert.match(acceptSrc, /hasLegacyTokenQuery/);
+    assert.match(acceptSrc, /history\.replaceState/);
+    // Must not read token from query search params
+    assert.doesNotMatch(acceptSrc, /searchParams\.get\(['"]token['"]\)/);
+    // Unauthenticated path must not embed token in next
+    assert.doesNotMatch(acceptSrc, /next=.*token/);
+    assert.doesNotMatch(acceptSrc, /\/invite\/accept\?token=/);
   });
 
   it('getCurrentMembership refuses multiple active orgs', () => {
@@ -383,9 +396,10 @@ describe('app signup / onboarding / invite sources (static)', () => {
     assert.match(orgSrc, /data\.length > 1/);
   });
 
-  it('login and callback guard next path against open redirect', () => {
+  it('login and callback guard next path against open redirect and token leakage', () => {
     assert.match(loginSrc, /safeNextPath/);
     assert.match(callbackSrc, /safeNextPath/);
-    assert.match(callbackSrc, /startsWith\('\/'\)/);
+    assert.match(loginSrc, /@\/lib\/auth\/inviteUrl/);
+    assert.match(callbackSrc, /@\/lib\/auth\/inviteUrl/);
   });
 });
