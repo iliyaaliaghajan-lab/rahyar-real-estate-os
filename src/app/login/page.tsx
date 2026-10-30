@@ -1,10 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { safeNextPath } from '@/lib/auth/inviteUrl';
 import { Button, Card, Callout, Field, Input, PageHeader } from '@/components/ui';
 
-export default function LoginPage() {
+function LoginForm() {
+  const searchParams = useSearchParams();
+  const nextPath = useMemo(() => safeNextPath(searchParams.get('next')), [searchParams]);
+
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -15,17 +20,23 @@ export default function LoginPage() {
     setMessage(null);
 
     const supabase = createClient();
+    // nextPath is already sanitized; it never carries an invitation token.
+    const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextPath)}`;
+
     const { error } = await supabase.auth.signInWithOtp({
       email: email.trim(),
       options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
+        emailRedirectTo: redirectTo,
       },
     });
 
     setLoading(false);
 
     if (error) {
-      setMessage({ type: 'error', text: error.message || 'خطا در ارسال لینک ورود. لطفاً دوباره تلاش کنید.' });
+      setMessage({
+        type: 'error',
+        text: error.message || 'خطا در ارسال لینک ورود. لطفاً دوباره تلاش کنید.',
+      });
       return;
     }
 
@@ -72,5 +83,13 @@ export default function LoginPage() {
         </Card>
       </div>
     </>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<div className="px-4 py-8 text-center text-sm text-slate-500">بارگذاری...</div>}>
+      <LoginForm />
+    </Suspense>
   );
 }

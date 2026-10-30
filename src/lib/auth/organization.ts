@@ -12,12 +12,8 @@ export interface CurrentMembership {
 /**
  * Resolves the current user's active organization membership.
  *
- * Returns null if:
- * - user is not authenticated
- * - user has no active membership
- *
- * For Phase 1 we assume a user belongs to at most one active organization.
- * Multi-organization support can be added later without breaking this API.
+ * Phase 1 enforces at most one active organization per user.
+ * If multiple active rows exist, returns null (does not pick arbitrarily).
  */
 export async function getCurrentMembership(): Promise<CurrentMembership | null> {
   const supabase = createClient();
@@ -38,28 +34,33 @@ export async function getCurrentMembership(): Promise<CurrentMembership | null> 
         id,
         name
       )
-    `
+    `,
     )
     .eq('user_id', user.id)
-    .eq('status', 'active')
-    .limit(1)
-    .maybeSingle();
+    .eq('status', 'active');
 
-  if (error || !data || !data.organizations) {
+  if (error || !data || data.length === 0) {
     return null;
   }
 
-  // Supabase returns the related organization as an object (or array in some cases)
-  const org = Array.isArray(data.organizations)
-    ? data.organizations[0]
-    : data.organizations;
+  // Do not silently choose among multiple orgs
+  if (data.length > 1) {
+    console.warn(
+      '[getCurrentMembership] multiple active memberships; refusing arbitrary selection',
+    );
+    return null;
+  }
 
+  const row = data[0];
+  if (!row.organizations) return null;
+
+  const org = Array.isArray(row.organizations) ? row.organizations[0] : row.organizations;
   if (!org) return null;
 
   return {
     organizationId: org.id,
     organizationName: org.name,
-    role: data.role as MemberRole,
+    role: row.role as MemberRole,
     userId: user.id,
   };
 }
