@@ -52,12 +52,13 @@ This is a **best-effort** guard against accidental remote targets. It does **not
 
 On refusal the script exits with a clear message and does not print secrets (passwords, tokens, or connection strings with credentials).
 
+
 ## How to run
 
 ### Local
 
 ```bash
-export intens/var/run/postgresql   # or 127.0.0.1
+export PGHOST=/var/run/postgresql   # or 127.0.0.1
 export PGPORT=5432
 export PGUSER=postgres
 # export PGPASSWORD=...             # if using password auth
