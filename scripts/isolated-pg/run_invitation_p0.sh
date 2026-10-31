@@ -66,20 +66,67 @@ assert_local_target() {
   fi
 }
 
+is_valid_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local o
+  IFS=. read -r -a parts <<< "$ip"
+  for o in "${parts[@]}"; do
+    [[ "$o" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$o >= 0 && 10#$o <= 255 )) || return 1
+  done
+  return 0
+}
+
+# True when client connects via explicit loopback (required for CI service exception).
+is_loopback_pghost() {
+  local host="${PGHOST:-}"
+  [[ -z "$host" || "$host" == "localhost" ]] && return 0
+  is_loopback_ip "$host" && return 0
+  return 1
+}
+
 assert_server_is_local() {
   local addr
   addr=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$ROOT_DB" -At -c "SELECT COALESCE(host(inet_server_addr()), '');" 2>/dev/null || echo "QUERY_FAILED")
   if [[ "$addr" == "QUERY_FAILED" ]]; then
     fail "Could not query inet_server_addr(); refusing to proceed."
   fi
-  if [[ -n "$addr" ]] && ! is_loopback_ip "$addr"; then
-    fail "Refusing non-loopback server address from inet_server_addr()='${addr}'. Only local Postgres is allowed."
-  fi
+
+  # Unix socket or loopback server address: always allowed.
   if [[ -z "$addr" ]]; then
     log "Server address check: Unix socket (inet_server_addr is NULL) — allowed"
-  else
-    log "Server address check: ${addr} (loopback) — allowed"
+    return 0
   fi
+  if is_loopback_ip "$addr"; then
+    log "Server address check: ${addr} (loopback) — allowed"
+    return 0
+  fi
+
+  # Narrow CI-only exception: GitHub Actions job service container IP.
+  # The workflow inspects job.services.postgres.id and exports the exact IPv4
+  # as P0_ALLOWED_SERVER_ADDR. We accept that address only when every condition
+  # below holds. Arbitrary private/RFC1918 ranges are NOT allowed.
+  if [[ "${GITHUB_ACTIONS:-}" == "true" \
+     && "${P0_ALLOW_SERVICE_CONTAINER:-}" == "1" \
+     && -n "${P0_ALLOWED_SERVER_ADDR:-}" ]]; then
+    if ! is_loopback_pghost; then
+      fail "CI service-container exception requires loopback PGHOST (got '${PGHOST}')."
+    fi
+    if [[ -n "${PGHOSTADDR:-}" ]] && ! is_loopback_ip "$PGHOSTADDR"; then
+      fail "CI service-container exception requires empty or loopback PGHOSTADDR (got '${PGHOSTADDR}')."
+    fi
+    if ! is_valid_ipv4 "$P0_ALLOWED_SERVER_ADDR"; then
+      fail "P0_ALLOWED_SERVER_ADDR is not a valid IPv4 address."
+    fi
+    if [[ "$addr" == "$P0_ALLOWED_SERVER_ADDR" ]]; then
+      log "Server address check: ${addr} matches inspected GHA postgres service container — allowed"
+      return 0
+    fi
+    fail "Refusing server address inet_server_addr()='${addr}' (does not match inspected service IP '${P0_ALLOWED_SERVER_ADDR}')."
+  fi
+
+  fail "Refusing non-loopback server address from inet_server_addr()='${addr}'. Only local Postgres is allowed (or exact GHA service container IP with explicit opt-in)."
 }
 
 extract_uuid() {
