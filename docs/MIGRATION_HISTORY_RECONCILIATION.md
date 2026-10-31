@@ -46,12 +46,11 @@ observed remote chronology via filename timestamps.
 | `003_secure_org_policies.sql` | `20261022230904_secure_org_policies.sql` |
 | `004_default_privs_and_profile.sql` | `20261022230911_default_privs_and_profile.sql` |
 | `005_organization_invitations.sql` | `20261022230925_organization_invitations.sql` |
-| `007_secure_invitation_privacy_and_validation.sql` | `20261026115345_secure_invitation_privacy_and_validation.sql` |
 | `006_invite_fk_indexes_and_single_org_create.sql` | `20261027003152_invite_fk_indexes_and_single_org_create.sql` |
+| `007_secure_invitation_privacy_and_validation.sql` | `20261026115345_secure_invitation_privacy_and_validation.sql` |
 | `008_rls_helper_schema_and_profile_policy_optimization.sql` | `20261029181022_rls_helper_schema_and_profile_policy_optimization.sql` |
 
-Sequential filenames are **removed** from `supabase/migrations/` on this branch
-so the CLI execution directory has a single ordered set of files.
+Sequential executable copies are **not** retained alongside the timestamp files.
 
 ## Canonical sources and blob SHAs
 
@@ -87,44 +86,47 @@ row was written.** Remote `statements` were not re-fetched in this PR.
 3. **Git migration files** — what CLI would apply on a fresh database or
    `db push`.
 
-This PR only adjusts (3) so version prefixes can align with (2). It does not
-mutate (1) or (2).
+The migration-history portion of this PR adjusts (3) so version prefixes can align with (2). It does not mutate (1) or (2).
+
+### Migration 008 header vs status log
+
+The Migration 008 SQL file header uses “authored only” wording and warns that Git presence must not be treated as proof of Staging application or authorization to apply the migration.
+
+Separately, `docs/STAGING_MIGRATION_008_STATUS.md` retains an earlier report of Staging version `20261029181022` and historical observations about the live environment.
+
+Those historical observations were not independently re-verified on PR #4 HEAD.
+
+Production migration history remains unverified.
 
 ## Production
 
 **Production migration history has not been verified.** This PR is not
 permission to deploy to Production, run `db push` against Production, or run
-`migration repair` anywhere.
+migrations against any non-disposable environment.
 
-## Automation in this repository
+## What this reconciliation does not do
 
-Inspected workflows do not run `supabase db push` or other remote migration
-apply commands. CI (where present) runs unit/typecheck/lint/build. Staging
-security smoke exercises API behavior only. Absence of automated push reduces
-immediate accident risk but does not make sequential filenames safe for a
-future CLI-based deploy pipeline.
-
-## Local reproducibility warning
+- Does not execute SQL against Staging or Production.
+- Does not repair or rewrite remote `schema_migrations` rows.
+- Does not claim that Git blob equality equals the exact bytes applied when a
+  remote version row was written.
+- Does not authorize merge of PR #1 or any other PR.
 
 A fresh local `supabase db reset` (or equivalent) against a **disposable local
 only** database should be tested before declaring the chain fully reproducible.
-That test is outside the default scope of opening this Draft PR and must not
-target a linked remote project.
 
-## Explicit non-goals of this PR
+## Related PRs
+
+- **PR #1** carries invitation/security application work on sequential and/or
+  feature-branch migration paths.
+- **PR #2** registered sequential `008` plus a Staging status note (status doc retained; sequential `008` file not kept).
+- **PR #3 / verify line** recovered timestamp alignment and isolated Postgres
+  CLI version matching with observed Staging history.
+- **PR #4 (this integration branch)** combines application security work with the
+  timestamp-only executable migration tree.
+
+## Safety
 
 - No SQL execution against Staging or Production
-- No `migration repair`
-- No merge of PR #1 or PR #2
-- No change to `main`
-- No claim that unit tests or prior smoke runs prove migration-history compatibility
-
-## Relationship to other Draft PRs
-
-- **PR #1** originated sequential `005`–`007` and invitation/security application work (integrated here with timestamp paths).
-- **PR #2** registered sequential `008` plus a Staging status note (status doc retained; sequential `008` file not kept).
-- **This PR** proposes a single ordered, timestamp-prefixed chain suitable for
-  CLI version matching with observed Staging history.
-
-Human review should decide sequencing: reconcile history, then supersede or
-retarget related Drafts. Do not auto-merge.
+- No change to `main` by this document alone
+- No auto-merge

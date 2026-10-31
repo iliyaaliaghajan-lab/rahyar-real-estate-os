@@ -1,8 +1,22 @@
 # Staging Migration 008 — recorded status
 
-This document records the **repository registration** of Migration 008 and the
-**observed** Staging state at the time of verification. It does **not** apply
-any SQL. Presence of the migration file in git must not be read as “apply now”.
+This document is a **status log**, not an apply runbook. It does **not** execute
+SQL. Distinguish three facts that must not be conflated:
+
+1. **Git presence** — the executable file
+   `supabase/migrations/20261029181022_rls_helper_schema_and_profile_policy_optimization.sql`
+   exists in this branch.
+   Git presence alone neither proves that a migration was applied in an environment nor authorizes applying it.
+   The migration SQL header’s “authored only” wording is apply-authorization hygiene for the Git tree, not a denial that Staging history was observed earlier.
+2. **Recorded Staging history** — a prior read-only observation reported version
+   `20261029181022` in Staging `supabase_migrations.schema_migrations` (see table
+   below). That is history evidence from an earlier review window, not a new proof
+   produced on PR #4 HEAD (`5e65656224d356e9895f2381baa31625f539295e`).
+3. **Live schema effects** — objects/policies/grants on the Staging database, and
+   Data API exposed-schema settings, as reported in that same earlier window.
+   **PR #4 did not independently re-verify** those live effects.
+
+**Production migration history remains unverified.**
 
 ## Target environment
 
@@ -20,7 +34,7 @@ any SQL. Presence of the migration file in git must not be read as “apply now�
 | Canonical repository filename | `supabase/migrations/20261029181022_rls_helper_schema_and_profile_policy_optimization.sql` |
 | SQL blob SHA (source of truth) | `43621e6b75d83f08ce65db168116b39188dfc23b` |
 | Source branch for SQL | `verify/migration-008-isolated-postgres-recovered` / PR3 reconciliation |
-| Version recorded in Staging `supabase_migrations.schema_migrations` | `20261029181022` |
+| Version previously reported in Staging `supabase_migrations.schema_migrations` | `20261029181022` |
 
 ### Filename vs timestamp version
 
@@ -45,12 +59,15 @@ migration history remains unverified.**
   - `public.create_organization_invitation`
   - `public.accept_organization_invitation`
 
-## Documented Staging state (post-apply)
+## Documented Staging state (reported earlier; not re-verified on PR #4 HEAD)
 
-The following items were reported from live Staging review and security smoke.
-Items that this automation could not re-query via SQL are marked appropriately
-in the mission report; the owner dashboard checks of 2026-10-29 are cited as
-the source for exposure settings.
+The following items were **reported** from a prior live Staging review and
+security smoke (see run metadata below). They are retained as historical audit
+notes. They are **not** claims that this integration HEAD re-queried Staging SQL,
+Dashboard exposure settings, or row counts.
+Items that the earlier automation could not re-query via SQL were marked
+appropriately in that mission report; the owner dashboard checks of 2026-10-29
+are cited as the source for exposure settings from that window only.
 
 - Schema `private` exists.
 - Legacy public helper functions above were removed from `public`.
