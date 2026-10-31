@@ -1,0 +1,78 @@
+name: Isolated Invitation P0 (Postgres)
+
+on:
+  push:
+    branches:
+      - feat/etehad-secure-invitations-and-rls
+  pull_request:
+    branches:
+      - feat/etehad-secure-invitations-and-rls
+  workflow_dispatch:
+
+concurrency:
+  group: isolated-inv-p0-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  db-integration:
+    name: Invitation P0 (PG ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["15", "16"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -p 5432 -U postgres; then
+              echo "Postgres ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Install client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: Run invitation P0 tests
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          CONCURRENCY_ROUNDS: "5"
+          MIGRATIONS_DIR: supabase/migrations
+          STUBS_DIR: scripts/isolated-pg
+        run: |
+          chmod +x scripts/isolated-pg/run_invitation_p0.sh
+          scripts/isolated-pg/run_invitation_p0.sh
+
+  unit-contracts:
+    name: Unit / static contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
