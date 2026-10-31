@@ -50,8 +50,25 @@ Before any `CREATE DATABASE` / `DROP DATABASE`, the runner:
 
 This is a **best-effort** guard against accidental remote targets. It does **not** protect against a local tunnel or proxy that presents as loopback (e.g. SSH local port forward to a remote Postgres). Operators must still ensure the target is a temporary test instance.
 
-On refusal the script exits with a clear message and does not print secrets (passwords, tokens, or connection strings with credentials).
+### GitHub Actions service-container exception
 
+In CI, the job connects with `PGHOST=127.0.0.1` (port publish), but PostgreSQL reports `inet_server_addr()` as the **container-side** address (e.g. `172.18.0.2`). The workflow therefore:
+
+1. Reads `${{ job.services.postgres.id }}` (the exact service container for this job).
+2. Runs `docker inspect` to obtain that container’s IPv4 address.
+3. Exports `P0_ALLOWED_SERVER_ADDR=<that IP>` and `P0_ALLOW_SERVICE_CONTAINER=1` via `$GITHUB_ENV`.
+
+The runner accepts a non-loopback `inet_server_addr()` **only** when all of these hold:
+
+- `GITHUB_ACTIONS=true`
+- `P0_ALLOW_SERVICE_CONTAINER=1`
+- `PGHOST` is loopback (preferably `127.0.0.1`)
+- `PGHOSTADDR` is empty or loopback
+- `inet_server_addr()` equals `P0_ALLOWED_SERVER_ADDR` **exactly**
+
+Arbitrary private/RFC1918 ranges are **not** allowed. Setting `P0_ALLOWED_SERVER_ADDR` without the opt-in flag does not bypass the guard.
+
+On refusal the script exits with a clear message and does not print secrets (passwords, tokens, or connection strings with credentials).
 
 ## How to run
 
@@ -79,6 +96,7 @@ Workflow: `.github/workflows/isolated-invitation-p0.yml`
 - No Supabase secrets required
 - `pull_request` filter targets the PR **base** branch `fix/staging-security-audit-v2`
 - Minimal permissions: `contents: read`
+- Resolves exact service container IP via `job.services.postgres.id` + `docker inspect`
 
 ## Success criteria
 
