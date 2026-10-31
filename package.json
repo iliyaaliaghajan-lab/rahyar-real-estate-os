@@ -2,7 +2,6 @@
   "name": "rahyar",
   "version": "0.1.0",
   "private": true,
-  "description": "اتحاد / رهیار — سیستم‌عامل هوشمند مشاوران املاک (Next.js + Supabase multi-tenant)",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -11,27 +10,30 @@
     "typecheck": "tsc --noEmit",
     "typecheck:logic": "tsc --noEmit -p tsconfig.logic.json",
     "test": "tsx --test tests/*.test.ts",
-    "test:staging-security": "node scripts/staging-security-smoke.mjs"
+    "test:staging-security": "node scripts/staging-security-smoke.mjs",
+    "test:db-integration": "scripts/isolated-pg/run_invitation_p0.sh && scripts/isolated-pg/run_tenant_isolation_p0.sh"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",
-    "@supabase/supabase-js": "^2.45.4",
-    "dexie": "^4.0.8",
-    "dexie-react-hooks": "^1.1.7",
-    "next": "^14.2.15",
+    "@supabase/supabase-js": "^2.47.10",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.468.0",
+    "next": "14.2.18",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.5.5",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.0",
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
     "autoprefixer": "^10.4.20",
-    "eslint": "^8.57.0",
-    "eslint-config-next": "^14.2.15",
-    "postcss": "^8.4.41",
-    "tailwindcss": "^3.4.10",
-    "tsx": "^4.19.0",
-    "typescript": "^5.5.4"
+    "eslint": "^8.57.1",
+    "eslint-config-next": "14.2.18",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.16",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
   }
 }
