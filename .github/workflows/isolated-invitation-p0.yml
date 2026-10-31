@@ -1,17 +1,22 @@
 name: Isolated Invitation P0 (Postgres)
 
+# Temporary isolated Postgres only. No Supabase / Staging / Production.
 on:
   push:
     branches:
       - feat/etehad-secure-invitations-and-rls
   pull_request:
+    # GitHub pull_request.branches filters the PR *base* (target) branch.
     branches:
-      - feat/etehad-secure-invitations-and-rls
+      - fix/staging-security-audit-v2
   workflow_dispatch:
 
 concurrency:
   group: isolated-inv-p0-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   db-integration:
@@ -48,6 +53,7 @@ jobs:
             fi
             sleep 2
           done
+          echo "Postgres did not become ready"
           exit 1
       - name: Install client
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client

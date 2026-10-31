@@ -7,8 +7,8 @@ Close the gap between static/unit contracts and real PostgreSQL behaviour for or
 These tests exercise:
 
 - **Test A** — Expired invitation is rejected (`Invitation expired`); status stays `pending`; no membership row.
-- **Test B** — Concurrent accept of the *same* token from two independent connections: exactly one success, one active membership, invitation becomes `accepted`.
-- **Test C** — Concurrent accept of *two different* tokens (two orgs, same invitee email): exactly one success; the unique index `idx_org_members_one_active_per_user` (and application checks) ensure a single active membership.
+- **Test B** — Concurrent accept of the *same* token from two independent connections: exactly one success; the losing connection must raise **`Invitation already accepted`**.
+- **Test C** — Concurrent accept of *two different* tokens (two orgs, same invitee email): exactly one success; the loser must hit either the unique index `idx_org_members_one_active_per_user` or the application rejection `User already belongs to another organization`; the losing invitation stays `pending`; `accepted_by` and active membership org match the winner.
 
 They are **not** a substitute for live Supabase Staging smoke or browser E2E.
 
@@ -21,7 +21,7 @@ They are **not** a substitute for live Supabase Staging smoke or browser E2E.
 Stubs (`scripts/isolated-pg/00_auth_and_roles.sql`):
 
 - schema `auth` + minimal `auth.users`
-- `auth.uid()` / `auth.set_test_uid()` GUC helpers
+- `auth.uid()` / `auth.set_test_uid()` GUC helpers (session GUC, not real JWTs)
 - roles `anon`, `authenticated`, `service_role`
 - `extensions.pgcrypto` for `digest` / token hashing
 - minimal business tables so migration “IF EXISTS” paths run
@@ -30,12 +30,34 @@ Migrations applied in order (unchanged):
 
 `001` → `002` → `003` → `004` → `005` → `006` → `007`
 
+### Limits of the isolated auth stub
+
+The harness sets `request.jwt.claim.sub` via `auth.set_test_uid()`. It does **not**:
+
+- validate or parse real Supabase Auth JWTs
+- exercise Supabase Auth hooks, session cookies, or RLS policies under live JWT claims
+- prove behaviour of the hosted Supabase Auth schema beyond the minimal `auth.users` table and `auth.uid()` stub
+
+Passing these tests proves PostgreSQL-level invitation RPC locking, expiration, and the unique active-membership index under concurrent connections. It does **not** prove live Supabase JWT/RLS end-to-end security.
+
+## Local-host-only connection guard
+
+Before any `CREATE DATABASE` / `DROP DATABASE`, the runner:
+
+1. Accepts only loopback hosts (`localhost`, `127.0.0.1`, `::1`) or approved local Unix socket paths (`/var/run/postgresql`, `/run/postgresql`, `/tmp`, and subpaths).
+2. If `PGHOSTADDR` is set, accepts only loopback IP addresses.
+3. Connects to the root database and queries `inet_server_addr()`. Non-loopback addresses are refused. `NULL` (Unix socket) is allowed.
+
+This is a **best-effort** guard against accidental remote targets. It does **not** protect against a local tunnel or proxy that presents as loopback (e.g. SSH local port forward to a remote Postgres). Operators must still ensure the target is a temporary test instance.
+
+On refusal the script exits with a clear message and does not print secrets (passwords, tokens, or connection strings with credentials).
+
 ## How to run
 
 ### Local
 
 ```bash
-export PGHOST=/var/run/postgresql   # or 127.0.0.1
+export intens/var/run/postgresql   # or 127.0.0.1
 export PGPORT=5432
 export PGUSER=postgres
 # export PGPASSWORD=...             # if using password auth
@@ -54,14 +76,18 @@ Workflow: `.github/workflows/isolated-invitation-p0.yml`
 - `CONCURRENCY_ROUNDS=5`
 - Also runs existing `npm test` unit/static contracts
 - No Supabase secrets required
+- `pull_request` filter targets the PR **base** branch `fix/staging-security-audit-v2`
+- Minimal permissions: `contents: read`
 
 ## Success criteria
 
 | Test | Success |
 |------|---------|
 | A | RPC raises `Invitation expired`; `status = pending`; 0 active memberships for invitee |
-| B | Exactly 1 of 2 concurrent accepts succeeds; 1 active membership; invitation `accepted` with correct `accepted_by` |
-| C | Exactly 1 of 2 concurrent accepts succeeds; 1 active membership total; 1 invitation `accepted` |
+| B | Exactly 1 of 2 concurrent accepts succeeds; **loser error is exactly `Invitation already accepted`**; 1 active membership; invitation `accepted` with correct `accepted_by` |
+| C | Exactly 1 of 2 concurrent accepts succeeds; loser error is unique-index violation **or** `User already belongs to another organization`; losing invitation stays `pending`; winner `accepted_by` = invitee; active membership org = accepted invitation org |
+
+Each concurrent scenario is repeated `CONCURRENCY_ROUNDS` times with fresh random data and independent PostgreSQL connections (not sequential calls).
 
 ## What these tests do **not** prove
 
@@ -70,10 +96,11 @@ Workflow: `.github/workflows/isolated-invitation-p0.yml`
 - Staging/Production migration history or advisor findings
 - Email delivery, rate limiting, or browser E2E
 - Behaviour under Migration 008 (not present on this branch)
+- Protection against a localhost tunnel to a remote database
 
 ## Safety
 
 - Does not modify `main` or the PR base branch.
 - Does not alter any migration SQL (including `007`).
 - Does not dispatch Staging workflows or touch remote Supabase projects.
-- Temporary database is always dropped on exit.
+- Temporary database is always dropped on exit (only after the local-host safety checks pass).
