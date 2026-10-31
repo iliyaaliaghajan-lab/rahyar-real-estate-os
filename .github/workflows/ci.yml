@@ -6,9 +6,12 @@ on:
       - main
       - fix/staging-security-audit-v2
       - feat/etehad-secure-invitations-and-rls
+      - ai/etehad-integration-dryrun-20261030
+      - feat/etehad-next16-upgrade
   push:
     branches:
       - feat/etehad-secure-invitations-and-rls
+      - feat/etehad-next16-upgrade
 
 jobs:
   check:
