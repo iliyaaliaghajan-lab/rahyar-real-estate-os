@@ -44,6 +44,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Wait for Postgres
         run: |
           for i in $(seq 1 30); do
@@ -55,8 +56,37 @@ jobs:
           done
           echo "Postgres did not become ready"
           exit 1
+
       - name: Install client
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Resolve postgres service container IP
+        # job.services.postgres.id is the exact Docker container for this job's
+        # postgres service. We allow only that container's IPv4 — not a CIDR.
+        # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${POSTGRES_CONTAINER_ID}" ]]; then
+            echo "job.services.postgres.id is empty"
+            exit 1
+          fi
+          # Prefer the first IPv4 on the default bridge network for this container.
+          IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{println}}{{end}}' "$POSTGRES_CONTAINER_ID" | awk 'NF{print; exit}')
+          if [[ -z "$IP" ]]; then
+            echo "Could not resolve IPv4 for postgres service container"
+            exit 1
+          fi
+          # Validate single dotted-quad IPv4
+          if ! [[ "$IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            echo "Resolved address is not a valid IPv4: $IP"
+            exit 1
+          fi
+          echo "P0_ALLOWED_SERVER_ADDR=$IP" >> "$GITHUB_ENV"
+          echo "P0_ALLOW_SERVICE_CONTAINER=1" >> "$GITHUB_ENV"
+          echo "Inspected postgres service container IP: $IP"
+
       - name: Run invitation P0 tests
         env:
           PGHOST: 127.0.0.1
@@ -66,6 +96,7 @@ jobs:
           CONCURRENCY_ROUNDS: "5"
           MIGRATIONS_DIR: supabase/migrations
           STUBS_DIR: scripts/isolated-pg
+          # P0_ALLOWED_SERVER_ADDR and P0_ALLOW_SERVICE_CONTAINER come from GITHUB_ENV
         run: |
           chmod +x scripts/isolated-pg/run_invitation_p0.sh
           scripts/isolated-pg/run_invitation_p0.sh
