@@ -25,10 +25,8 @@ jobs:
           node-version: "24"
           cache: npm
 
-      # Temporary: package-lock still reflects Next 14 until the regenerated lock is pushed.
-      # Local verification used a full Next 16 lockfile; restore npm ci after lock is committed.
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Unit / static contract tests
         run: npm test
