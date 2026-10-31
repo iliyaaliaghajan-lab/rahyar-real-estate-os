@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { getCurrentMembership, type CurrentMembership } from '@/lib/auth/organization';
+import { ROLE_PERMISSIONS } from '@/lib/auth/roles';
 import { AuthGate } from '@/components/AuthGate';
 import { Badge, Button, Card, EmptyState, ListSkeleton, PageHeader, Section } from '@/components/ui';
 
@@ -51,14 +52,16 @@ function TeamContent() {
       const supabase = createClient();
       const { data, error: qError } = await supabase
         .from('organization_members')
-        .select(`
+        .select(
+          `
           id,
           role,
           status,
           joined_at,
           user_id,
           profiles ( full_name )
-        `)
+        `,
+        )
         .eq('organization_id', m.organizationId)
         .order('created_at', { ascending: true });
 
@@ -74,7 +77,9 @@ function TeamContent() {
     }
 
     load();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!membership || members === null) {
@@ -86,7 +91,7 @@ function TeamContent() {
     );
   }
 
-  const isOwner = membership.role === 'owner';
+  const canInvite = ROLE_PERMISSIONS[membership.role].canManageMembers;
 
   return (
     <>
@@ -95,7 +100,7 @@ function TeamContent() {
         subtitle={membership.organizationName}
         back="/"
         action={
-          isOwner ? (
+          canInvite ? (
             <Button href="/team/invite" size="sm" variant="secondary">
               دعوت عضو
             </Button>
@@ -104,14 +109,12 @@ function TeamContent() {
       />
 
       <Section>
-        {error && (
-          <p className="mb-3 text-sm text-red-600">{error}</p>
-        )}
+        {error && <p className="mb-3 text-sm text-red-600">{error}</p>}
 
         {members.length === 0 ? (
           <EmptyState
             title="هنوز عضوی ثبت نشده"
-            hint="به‌عنوان مالک می‌توانید همکاران را دعوت کنید."
+            hint="مالک یا مدیر می‌تواند همکاران را دعوت کند."
           />
         ) : (
           <Card className="divide-y divide-slate-100">
@@ -145,10 +148,10 @@ function TeamContent() {
         )}
       </Section>
 
-      {!isOwner && (
+      {!canInvite && (
         <Section>
           <p className="text-center text-xs text-slate-400">
-            فقط مالک مجموعه می‌تواند عضو جدید دعوت کند.
+            فقط مالک یا مدیر مجموعه می‌تواند عضو جدید دعوت کند.
           </p>
         </Section>
       )}
