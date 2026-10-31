@@ -23,6 +23,65 @@ log() { printf '[p0] %s\n' "$*"; }
 pass() { log "PASS: $*"; }
 fail() { log "FAIL: $*"; exit 1; }
 
+# ---------------------------------------------------------------------------
+# Safety: refuse non-local PostgreSQL targets before any DB mutation.
+# Best-effort guard; does NOT protect against a local tunnel to a remote DB.
+# ---------------------------------------------------------------------------
+is_loopback_ip() {
+  local ip="$1"
+  case "$ip" in
+    127.*|::1|0:0:0:0:0:0:0:1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_local_socket_path() {
+  local h="$1"
+  case "$h" in
+    /var/run/postgresql|/var/run/postgresql/*|/tmp|/tmp/*|/run/postgresql|/run/postgresql/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+assert_local_target() {
+  if [[ -n "${PGHOSTADDR:-}" ]]; then
+    if ! is_loopback_ip "$PGHOSTADDR"; then
+      fail "Refusing non-loopback PGHOSTADDR='${PGHOSTADDR}'. Only localhost/127.0.0.1/::1 allowed."
+    fi
+  fi
+
+  local host="$PGHOST"
+  if [[ -z "$host" || "$host" == "localhost" ]]; then
+    :
+  elif is_loopback_ip "$host"; then
+    :
+  elif is_local_socket_path "$host"; then
+    :
+  else
+    fail "Refusing PGHOST='${host}'. Only localhost, 127.0.0.1, ::1, or local Unix socket paths are allowed."
+  fi
+}
+
+assert_server_is_local() {
+  local addr
+  addr=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$ROOT_DB" -At -c "SELECT COALESCE(host(inet_server_addr()), '');" 2>/dev/null || echo "QUERY_FAILED")
+  if [[ "$addr" == "QUERY_FAILED" ]]; then
+    fail "Could not query inet_server_addr(); refusing to proceed."
+  fi
+  if [[ -n "$addr" ]] && ! is_loopback_ip "$addr"; then
+    fail "Refusing non-loopback server address from inet_server_addr()='${addr}'. Only local Postgres is allowed."
+  fi
+  if [[ -z "$addr" ]]; then
+    log "Server address check: Unix socket (inet_server_addr is NULL) — allowed"
+  else
+    log "Server address check: ${addr} (loopback) — allowed"
+  fi
+}
+
 extract_uuid() {
   echo "$1" | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1
 }
@@ -32,11 +91,19 @@ psql_db() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$
 q() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At -c "$1"; }
 
 cleanup() {
+  if [[ "${SAFETY_OK:-0}" != "1" ]]; then
+    return 0
+  fi
   log "Cleanup: drop $WORK_DB"
   psql_root -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$WORK_DB' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
   psql_root -c "DROP DATABASE IF EXISTS $WORK_DB;" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+log "Safety: validating local-only PostgreSQL target"
+assert_local_target
+assert_server_is_local
+SAFETY_OK=1
 
 log "Preparing database $WORK_DB"
 psql_root -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$WORK_DB' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
@@ -181,8 +248,23 @@ run_test_b_once() {
     fail "Test B r$round failed invariants"
   fi
 
+  local loser_out="" loser_rc=""
+  if [[ "$rc1" != "0" && "$rc2" == "0" ]]; then
+    loser_out="$out1"; loser_rc="$rc1"
+  elif [[ "$rc2" != "0" && "$rc1" == "0" ]]; then
+    loser_out="$out2"; loser_rc="$rc2"
+  else
+    fail "Test B r$round: could not identify a unique losing connection (rc1=$rc1 rc2=$rc2)"
+  fi
+
+  if ! grep -qi "Invitation already accepted" "$loser_out"; then
+    log "Test B r$round loser (rc=$loser_rc) output:"
+    cat "$loser_out" || true
+    fail "Test B r$round: loser must report 'Invitation already accepted'"
+  fi
+
   rm -f "$barrier" "$out1" "$out2" "${out1}.rc" "${out2}.rc"
-  pass "Test B round $round: exactly one accept; one membership; status=accepted"
+  pass "Test B round $round: exactly one accept; loser got 'Invitation already accepted'"
 }
 
 run_test_b() {
@@ -260,8 +342,44 @@ run_test_c_once() {
     fail "Test C r$round failed invariants"
   fi
 
+  local winner_inv loser_inv loser_out loser_rc
+  if [[ "$rc1" == "0" && "$rc2" != "0" ]]; then
+    winner_inv="$inv1_id"
+    loser_inv="$inv2_id"
+    loser_out="$out2"
+    loser_rc="$rc2"
+  elif [[ "$rc2" == "0" && "$rc1" != "0" ]]; then
+    winner_inv="$inv2_id"
+    loser_inv="$inv1_id"
+    loser_out="$out1"
+    loser_rc="$rc1"
+  else
+    fail "Test C r$round: could not identify unique winner/loser (rc1=$rc1 rc2=$rc2)"
+  fi
+
+  if ! grep -qiE "User already belongs to another organization|idx_org_members_one_active_per_user|duplicate key value violates unique constraint" "$loser_out"; then
+    log "Test C r$round loser (rc=$loser_rc) output:"
+    cat "$loser_out" || true
+    fail "Test C r$round: loser must report unique-index violation or 'User already belongs to another organization'"
+  fi
+
+  local loser_status
+  loser_status=$(q "SELECT status FROM public.organization_invitations WHERE id = '$loser_inv';")
+  [[ "$loser_status" == "pending" ]] || fail "Test C r$round: losing invitation must stay pending, got $loser_status"
+
+  local winner_accepted_by winner_status
+  winner_status=$(q "SELECT status FROM public.organization_invitations WHERE id = '$winner_inv';")
+  winner_accepted_by=$(q "SELECT COALESCE(accepted_by::text,'') FROM public.organization_invitations WHERE id = '$winner_inv';")
+  [[ "$winner_status" == "accepted" ]] || fail "Test C r$round: winner invitation must be accepted, got $winner_status"
+  [[ "$winner_accepted_by" == "$invitee_id" ]] || fail "Test C r$round: accepted_by mismatch"
+
+  local active_org winner_org_id
+  active_org=$(q "SELECT organization_id::text FROM public.organization_members WHERE user_id = '$invitee_id' AND status = 'active';")
+  winner_org_id=$(q "SELECT organization_id::text FROM public.organization_invitations WHERE id = '$winner_inv';")
+  [[ "$active_org" == "$winner_org_id" ]] || fail "Test C r$round: active membership org ($active_org) != accepted invite org ($winner_org_id)"
+
   rm -f "$barrier" "$out1" "$out2" "${out1}.rc" "${out2}.rc"
-  pass "Test C round $round: one success, one active membership, one accepted invite"
+  pass "Test C round $round: one success; loser correct error; pending loser; accepted_by/org match"
 }
 
 run_test_c() {
