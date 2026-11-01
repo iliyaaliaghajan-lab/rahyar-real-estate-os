@@ -52,6 +52,6 @@ export const config = {
      * - _next/image (image optimization)
      * - favicon.ico, icons, manifest, service worker
      */
-    '/((?!_next/static|_next/image|favicon.ico|icon-.*\\.png|apple-touch-icon\\.png|manifest\\.webmanifest|sw\\.js).*)',
+    '/((?!_next/static|_next/image|favicon.ico|icon-.*\.png|apple-touch-icon\.png|manifest\.webmanifest|sw\.js).*)',
   ],
 };
