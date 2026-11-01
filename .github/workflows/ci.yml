@@ -6,24 +6,34 @@ on:
       - main
       - fix/staging-security-audit-v2
       - feat/etehad-secure-invitations-and-rls
+      - ai/etehad-integration-dryrun-20261030
+      - feat/etehad-next16-upgrade
   push:
     branches:
       - feat/etehad-secure-invitations-and-rls
+      - feat/etehad-next16-upgrade
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
 
+      - name: npm environment
+        run: |
+          node --version
+          npm --version
+          npm config get registry
+          npm config get cache
+
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: npm ci --no-audit --no-fund --loglevel=verbose --foreground-scripts --timing
 
       - name: Unit / static contract tests
         run: npm test
