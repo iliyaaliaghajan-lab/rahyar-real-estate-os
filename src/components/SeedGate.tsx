@@ -14,7 +14,7 @@ export function SeedGate({ children }: { children: ReactNode }) {
     return (
       <div className="p-4">
         <Callout tone="error" title="دسترسی به حافظه مرورگر ممکن نیست">
-          رهیار برای ذخیره‌سازی از IndexedDB استفاده می‌کند. اگر در حالت ناشناس هستید، مرورگر را در حالت عادی باز کنید.
+          اتحاد برای ذخیره‌سازی از IndexedDB استفاده می‌کند. اگر در حالت ناشناس هستید، مرورگر را در حالت عادی باز کنید.
         </Callout>
       </div>
     );

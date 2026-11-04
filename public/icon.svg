@@ -1,1 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0f766e"/><path d="M96 262 256 122l160 140" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/><path d="M146 240v150h220V240" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/><path d="M256 270l14 38 38 14-38 14-14 38-14-38-38-14 38-14z" fill="#fff"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="اتحاد">
+  <rect width="64" height="64" rx="12" fill="#0D2347"/>
+  <!-- house -->
+  <path d="M32 14 L50 28 V48 H38 V36 H26 V48 H14 V28 Z" fill="none" stroke="#F6B642" stroke-width="2.5" stroke-linejoin="round"/>
+  <!-- three people (simplified collaboration) -->
+  <circle cx="24" cy="30" r="2.2" fill="#5BA3D9"/>
+  <circle cx="32" cy="27" r="2.4" fill="#F6B642"/>
+  <circle cx="40" cy="30" r="2.2" fill="#5BA3D9"/>
+  <path d="M20 38c1.5-3 4-4.5 6.5-4.5S32 35 33 38" fill="none" stroke="#5BA3D9" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M28 36c1.2-2.5 3-3.5 4.5-3.5S36 33.5 37 36" fill="none" stroke="#F6B642" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M35 38c1.5-3 4-4.5 6.5-4.5S47 35 48 38" fill="none" stroke="#5BA3D9" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

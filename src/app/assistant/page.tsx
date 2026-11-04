@@ -9,7 +9,7 @@ export default function AssistantPage() {
   const router = useRouter();
   return (
     <>
-      <PageHeader title="دستیار" subtitle="کارهای تکراری را به رهیار بسپارید؛ هر چیزی که ثبت شود اول به تأیید شما می‌رسد." />
+      <PageHeader title="دستیار" subtitle="کارهای تکراری را به اتحاد بسپارید؛ هر چیزی که ثبت شود اول به تأیید شما می‌رسد." />
       <Section title="ثبت هوشمند فایل"><SmartEntry onSaved={(p) => router.push(`/properties/view/?id=${encodeURIComponent(p.id)}`)} /></Section>
       <Section><MessageDrafter /></Section>
       <Section><FollowUpSuggestions /></Section>

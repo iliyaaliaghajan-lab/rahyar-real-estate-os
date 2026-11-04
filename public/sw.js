@@ -1,8 +1,8 @@
-/* Rahyar service worker: precaches the app shell + static assets, then serves offline. */
-const CACHE = 'rahyar-v1';
+/* Etehad service worker: precaches the app shell + static assets, then serves offline. */
+const CACHE = 'etehad-v2';
 const ROUTES = ['/', '/properties/', '/properties/new/', '/properties/view/', '/properties/edit/', '/clients/', '/clients/new/',
   '/clients/view/', '/clients/edit/', '/clients/need/', '/followups/', '/followups/new/', '/assistant/', '/more/', '/search/'];
-const STATIC = ['/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'];
+const STATIC = ['/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png'];
 
 async function precache() {
   const cache = await caches.open(CACHE);

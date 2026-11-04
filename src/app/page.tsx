@@ -65,7 +65,7 @@ function DashboardContent() {
       </Section>
 
       <Section title="بهترین تطبیق‌ها">
-        {suggestions.length === 0 ? <EmptyState title="هنوز تطبیقی پیدا نشده" hint="فایل و نیاز ثبت کنید تا رهیار فایل مناسب را پیشنهاد دهد." /> :
+        {suggestions.length === 0 ? <EmptyState title="هنوز تطبیقی پیدا نشده" hint="فایل و نیاز ثبت کنید تا اتحاد فایل مناسب را پیشنهاد دهد." /> :
           <Card className="divide-y divide-slate-100">{suggestions.slice(0, 3).map((s) => (
             <Link key={s.need.id + s.property.id} href={`/clients/view/?id=${encodeURIComponent(s.need.clientId)}`} className="flex items-center justify-between gap-2 px-4 py-3 text-sm hover:bg-slate-50">
               <span className="min-w-0 truncate">{clientName(s.need.clientId)}<span className="block truncate text-xs text-slate-500">{s.property.title}</span></span>
