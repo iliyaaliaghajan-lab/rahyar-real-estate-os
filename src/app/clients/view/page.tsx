@@ -42,7 +42,7 @@ function View() {
       )}
       <Section title="نیازهای مشتری" action={<Button size="sm" variant="ghost" href={`/clients/need/?clientId=${encodeURIComponent(client.id)}`}><PlusIcon width={16} height={16} /> ثبت نیاز</Button>}>
         {!needs ? <ListSkeleton rows={1} /> : needs.length === 0
-          ? <EmptyState title="هنوز نیازی ثبت نشده" hint="با ثبت نیاز، رهیار فایل‌های مناسب را پیدا می‌کند." action={<Button href={`/clients/need/?clientId=${encodeURIComponent(client.id)}`}>ثبت نیاز</Button>} />
+          ? <EmptyState title="هنوز نیازی ثبت نشده" hint="با ثبت نیاز، اتحاد فایل‌های مناسب را پیدا می‌کند." action={<Button href={`/clients/need/?clientId=${encodeURIComponent(client.id)}`}>ثبت نیاز</Button>} />
           : <div className="space-y-4">{needs.map((n) => (
               <Card key={n.id} className="space-y-3 p-4">
                 <div className="flex flex-wrap gap-1.5">{needChips(n).map((c, i) => <Badge key={i} tone={i === 0 ? 'brand' : 'slate'}>{c}</Badge>)}</div>
