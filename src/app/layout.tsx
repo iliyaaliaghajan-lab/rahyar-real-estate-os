@@ -6,14 +6,20 @@ import { AppShell } from '@/components/AppShell';
 const vazir = Vazirmatn({ subsets: ['arabic', 'latin'], variable: '--font-vazir', display: 'swap' });
 
 export const metadata: Metadata = {
-  title: 'رهیار — دستیار هوشمند مشاور املاک',
-  description: 'ثبت فایل، ثبت مشتری، تطبیق هوشمند و پیگیری؛ کاملاً آفلاین.',
+  title: 'اتحاد — سیستم عامل همکاری املاک',
+  description: 'سیستم عامل هوشمند برای مدیریت فایل، مشتری، تطبیق و همکاری در کسب‌وکار املاک',
   manifest: '/manifest.webmanifest',
-  icons: { icon: '/icon.svg', apple: '/apple-touch-icon.png' },
-  appleWebApp: { capable: true, title: 'رهیار', statusBarStyle: 'default' },
+  icons: {
+    icon: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+      { url: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+    ],
+    apple: '/apple-touch-icon.png',
+  },
+  appleWebApp: { capable: true, title: 'اتحاد', statusBarStyle: 'default' },
 };
 export const viewport: Viewport = {
-  themeColor: '#0f766e',
+  themeColor: '#0D2347',
   width: 'device-width',
   initialScale: 1,
   viewportFit: 'cover',
