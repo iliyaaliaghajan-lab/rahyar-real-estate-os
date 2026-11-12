@@ -106,7 +106,7 @@ done
 log "=== Schema presence + RLS enabled ==="
 for t in properties clients needs follow_ups activities; do
   c=$(q "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='$t';")
-  [[ "$c" == "1" ]] || fail "table $t missing"
+  [[ "$c" == "1" ]] || fail fail "table $t missing"
   rls=$(q "SELECT relrowsecurity::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='$t';")
   [[ "$rls" == "t" ]] || fail "RLS not enabled on $t"
 done
@@ -124,8 +124,8 @@ q "INSERT INTO public.organization_members (organization_id, user_id, role, stat
    VALUES
      ('$oa','$ua','owner','active',now()),
      ('$ob','$ub','owner','active',now()),
-     ('$oa','$ud','member','active',now()),
-     ('$ob','$ud','member','active',now());" >/dev/null
+     ('$oa','$ud','agent','active',now()),
+     ('$ob','$ud','agent','active',now());" >/dev/null
 
 ca=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.clients (organization_id, name, created_by, updated_by) VALUES ('$oa','Client A','$ua','$ua') RETURNING id;")")
 cb=$(extract_uuid "$(as_auth "$ub" "INSERT INTO public.clients (organization_id, name, created_by, updated_by) VALUES ('$ob','Client B','$ub','$ub') RETURNING id;")")
@@ -180,7 +180,6 @@ echo "$err" | grep -qiE "foreign key|23503" || fail "expected FK violation, got:
 pass "composite FK rejects cross-org need"
 
 log "=== C5: organization_id immutable (single + dual member) ==="
-# Single-org owner
 set +e
 err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$ua');
@@ -193,7 +192,6 @@ echo "$err" | grep -qiE "organization_id cannot be changed|23514" || log "note: 
 final=$(q "SELECT organization_id::text FROM public.clients WHERE id = '$ca';")
 [[ "$final" == "$oa" ]] || fail "org_id changed unexpectedly to $final"
 
-# Dual member: still blocked by trigger (RLS would allow both orgs)
 for t_id_pair in "clients:$ca" "properties:$pa" "needs:$na" "follow_ups:$fa"; do
   t="${t_id_pair%%:*}"
   rid="${t_id_pair##*:}"
@@ -237,7 +235,6 @@ pass "activities are append-only (INSERT+SELECT only)"
 log "=== C7: follow_up same-org property; dual-member cross-org rejected ==="
 fid=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.follow_ups (organization_id, client_id, property_id, title, created_by, updated_by) VALUES ('$oa','$ca','$pa','FU2','$ua','$ua') RETURNING id;")")
 [[ -n "$fid" ]] || fail "same-org follow_up insert failed"
-# Dual member tries orgA follow_up pointing at orgB property — must fail same-org trigger
 set +e
 err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$ud');
@@ -266,7 +263,6 @@ for t_id_pair in "clients:$ca" "properties:$pa" "needs:$na" "follow_ups:$fa"; do
   final_cb=$(q "SELECT created_by::text FROM public.$t WHERE id = '$rid';")
   [[ "$final_cb" == "$ua" ]] || fail "created_by on $t changed to $final_cb"
 done
-# activities: no UPDATE privilege
 set +e
 err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$ua');
@@ -319,7 +315,6 @@ done
 pass "authenticated grants: full DML on four tables; SELECT+INSERT only on activities"
 
 log "=== C11: own-tenant CRUD for properties/clients/needs/follow_ups ==="
-# Re-seed a property (C9 deleted pa)
 pa2=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.properties (organization_id, title, created_by, updated_by) VALUES ('$oa','Prop A2','$ua','$ua') RETURNING id;")")
 [[ -n "$pa2" ]] || fail "CRUD re-seed property failed"
 n=$(as_auth "$ua" "SELECT count(*) FROM public.properties WHERE id = '$pa2';" | grep -E '^[0-9]+$' | tail -1)
@@ -351,7 +346,6 @@ n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB"
 " 2>&1 | grep -oE 'deleted=[0-9]+' | cut -d= -f2)
 [[ "${n:-0}" == "1" ]] || fail "CRUD DELETE property should affect 1"
 
-# clients
 cc=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.clients (organization_id, name, created_by, updated_by) VALUES ('$oa','CRUD C','$ua','$ua') RETURNING id;")")
 n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At -c "
   DO \$\$
@@ -380,7 +374,6 @@ n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB"
 " 2>&1 | grep -oE 'deleted=[0-9]+' | cut -d= -f2)
 [[ "${n:-0}" == "1" ]] || fail "CRUD DELETE client should affect 1"
 
-# needs (use existing ca)
 nc=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.needs (organization_id, client_id, created_by, updated_by) VALUES ('$oa','$ca','$ua','$ua') RETURNING id;")")
 n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At -c "
   DO \$\$
@@ -409,7 +402,6 @@ n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB"
 " 2>&1 | grep -oE 'deleted=[0-9]+' | cut -d= -f2)
 [[ "${n:-0}" == "1" ]] || fail "CRUD DELETE need should affect 1"
 
-# follow_ups
 fc=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.follow_ups (organization_id, client_id, title, created_by, updated_by) VALUES ('$oa','$ca','CRUD FU','$ua','$ua') RETURNING id;")")
 n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At -c "
   DO \$\$
