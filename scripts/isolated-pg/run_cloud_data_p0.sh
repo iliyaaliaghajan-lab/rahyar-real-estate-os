@@ -200,7 +200,7 @@ set -e
 pass "activities are append-only for authenticated"
 
 log "=== C7: follow_up same-org property OK; cross-org rejected ==="
-fid=$(extract_uuid "$(as_auth "$$ua" "INSERT INTO public.follow_ups (organization_id, client_id, property_id, title, created_by, updated_by) VALUES ('$oa','$ca','$pa','FU','$ua','$ua') RETURNING id;")")
+fid=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.follow_ups (organization_id, client_id, property_id, title, created_by, updated_by) VALUES ('$oa','$ca','$pa','FU','$ua','$ua') RETURNING id;")")
 [[ -n "$fid" ]] || fail "same-org follow_up insert failed"
 set +e
 err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
