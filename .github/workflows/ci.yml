@@ -8,10 +8,12 @@ on:
       - feat/etehad-secure-invitations-and-rls
       - ai/etehad-integration-dryrun-20261030
       - feat/etehad-next16-upgrade
+      - feat/etehad-branding-pwa-icons-20261105
   push:
     branches:
       - feat/etehad-secure-invitations-and-rls
       - feat/etehad-next16-upgrade
+      - feat/etehad-cloud-data-foundation-20261112
 
 jobs:
   check:
