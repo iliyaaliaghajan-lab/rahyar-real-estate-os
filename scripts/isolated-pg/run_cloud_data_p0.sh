@@ -106,7 +106,7 @@ done
 log "=== Schema presence + RLS enabled ==="
 for t in properties clients needs follow_ups activities; do
   c=$(q "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='$t';")
-  [[ "$c" == "1" ]] || fail fail "table $t missing"
+  [[ "$c" == "1" ]] || fail "table $t missing"
   rls=$(q "SELECT relrowsecurity::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='$t';")
   [[ "$rls" == "t" ]] || fail "RLS not enabled on $t"
 done
@@ -212,7 +212,7 @@ pass "organization_id immutable (owner + dual-member; trigger not only RLS)"
 log "=== C6: activities append-only ==="
 aid=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.activities (organization_id, type, text, created_by) VALUES ('$oa','client','hello','$ua') RETURNING id;")")
 [[ -n "$aid" ]] || fail "activity insert failed"
-n=$(as_auth "$ua" "SELECT count(*) FROM public.activities WHERE id = '$aid';" | grep -E '^[0-9]+$' | tail -1)
+n=$(as_auth "$ua" "SELECT "SELECT count(*) FROM public.activities WHERE id = '$aid';" | grep -E '^[0-9]+$' | tail -1)
 [[ "$n" == "1" ]] || fail "activity SELECT own failed"
 set +e
 err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
