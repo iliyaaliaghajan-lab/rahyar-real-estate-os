@@ -60,8 +60,6 @@ REVOKE ALL ON FUNCTION private.prevent_created_by_change() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.prevent_created_by_change() FROM anon;
 REVOKE ALL ON FUNCTION private.prevent_created_by_change() FROM authenticated;
 
--- Simple FK on property_id allows ON DELETE SET NULL without nulling organization_id
--- (composite FK + ON DELETE SET NULL would NULL all FK columns in PostgreSQL).
 CREATE OR REPLACE FUNCTION private.follow_ups_property_same_org()
 RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = ''
 AS $$
@@ -225,7 +223,7 @@ CREATE TRIGGER trg_needs_created_by_immutable BEFORE UPDATE ON public.needs
   FOR EACH ROW EXECUTE PROCEDURE private.prevent_created_by_change();
 
 DROP TRIGGER IF EXISTS trg_follow_ups_org_immutable ON public.follow_ups;
-CREATE TRIGGER trg_follow_ups_org_immutable BEFORE UPDATE ON publicfollow_ups
+CREATE TRIGGER trg_follow_ups_org_immutable BEFORE UPDATE ON public.follow_ups
   FOR EACH ROW EXECUTE PROCEDURE private.prevent_organization_id_change();
 DROP TRIGGER IF EXISTS trg_follow_ups_created_by_immutable ON public.follow_ups;
 CREATE TRIGGER trg_follow_ups_created_by_immutable BEFORE UPDATE ON public.follow_ups
