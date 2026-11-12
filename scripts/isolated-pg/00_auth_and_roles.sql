@@ -1,30 +1,10 @@
--- Isolated Postgres fixtures for invitation P0 security tests only.
+-- Isolated Postgres fixtures for invitation/tenant/cloud P0 security tests only.
 -- Never run this against Supabase, Staging, or Production.
+-- Business tables are NOT stubbed here; they are created by the cloud data foundation migration.
 
 CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-CREATE TABLE IF NOT EXISTS public.properties (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id uuid
-);
-CREATE TABLE IF NOT EXISTS public.clients (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id uuid
-);
-CREATE TABLE IF NOT EXISTS public.needs (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id uuid
-);
-CREATE TABLE IF NOT EXISTS public.follow_ups (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id uuid
-);
-CREATE TABLE IF NOT EXISTS public.activities (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id uuid
-);
 
 DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
