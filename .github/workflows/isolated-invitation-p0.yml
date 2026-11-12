@@ -1,13 +1,15 @@
-name: Isolated Postgres P0 (Invitation + Tenant)
+name: Isolated Postgres P0 (Invitation + Tenant + Cloud)
 
 # Temporary isolated Postgres only. No Supabase / Staging / Production.
 on:
   push:
     branches:
       - ai/etehad-integration-dryrun-20261030
+      - feat/etehad-cloud-data-foundation-20261112
   pull_request:
     branches:
       - fix/staging-security-audit-v2
+      - feat/etehad-branding-pwa-icons-20261105
   workflow_dispatch:
 
 concurrency:
@@ -19,7 +21,7 @@ permissions:
 
 jobs:
   db-integration:
-    name: Invitation + Tenant P0 (PG ${{ matrix.pg }})
+    name: Invitation + Tenant + Cloud P0 (PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -105,6 +107,18 @@ jobs:
         run: |
           chmod +x scripts/isolated-pg/run_tenant_isolation_p0.sh
           scripts/isolated-pg/run_tenant_isolation_p0.sh
+
+      - name: Cloud data foundation P0 (C1–C9)
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          MIGRATIONS_DIR: supabase/migrations
+          STUBS_DIR: scripts/isolated-pg
+        run: |
+          chmod +x scripts/isolated-pg/run_cloud_data_p0.sh
+          scripts/isolated-pg/run_cloud_data_p0.sh
 
   unit-contracts:
     name: Unit / static contracts
