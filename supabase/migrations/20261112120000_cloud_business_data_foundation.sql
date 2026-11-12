@@ -31,15 +31,11 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 CREATE OR REPLACE FUNCTION private.prevent_organization_id_change()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY INVOKER
-SET search_path = ''
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = ''
 AS $$
 BEGIN
   IF NEW.organization_id IS DISTINCT FROM OLD.organization_id THEN
-    RAISE EXCEPTION 'organization_id cannot be changed after create'
-      USING ERRCODE = '23514';
+    RAISE EXCEPTION 'organization_id cannot be changed after create' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
@@ -48,6 +44,47 @@ $$;
 REVOKE ALL ON FUNCTION private.prevent_organization_id_change() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.prevent_organization_id_change() FROM anon;
 REVOKE ALL ON FUNCTION private.prevent_organization_id_change() FROM authenticated;
+
+CREATE OR REPLACE FUNCTION private.prevent_created_by_change()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = ''
+AS $$
+BEGIN
+  IF NEW.created_by IS DISTINCT FROM OLD.created_by THEN
+    RAISE EXCEPTION 'created_by cannot be changed after create' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.prevent_created_by_change() FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.prevent_created_by_change() FROM anon;
+REVOKE ALL ON FUNCTION private.prevent_created_by_change() FROM authenticated;
+
+-- Simple FK on property_id allows ON DELETE SET NULL without nulling organization_id
+-- (composite FK + ON DELETE SET NULL would NULL all FK columns in PostgreSQL).
+CREATE OR REPLACE FUNCTION private.follow_ups_property_same_org()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = ''
+AS $$
+DECLARE
+  v_prop_org uuid;
+BEGIN
+  IF NEW.property_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT p.organization_id INTO v_prop_org FROM public.properties AS p WHERE p.id = NEW.property_id;
+  IF v_prop_org IS NULL THEN
+    RAISE EXCEPTION 'follow_ups.property_id must reference an existing property' USING ERRCODE = '23503';
+  END IF;
+  IF v_prop_org IS DISTINCT FROM NEW.organization_id THEN
+    RAISE EXCEPTION 'follow_ups.property_id must belong to the same organization' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.follow_ups_property_same_org() FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.follow_ups_property_same_org() FROM anon;
+REVOKE ALL ON FUNCTION private.follow_ups_property_same_org() FROM authenticated;
 
 CREATE TABLE IF NOT EXISTS public.properties (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -143,9 +180,9 @@ CREATE TABLE IF NOT EXISTS public.follow_ups (
     FOREIGN KEY (organization_id, client_id)
     REFERENCES public.clients (organization_id, id)
     ON DELETE CASCADE,
-  CONSTRAINT follow_ups_property_same_org_fkey
-    FOREIGN KEY (organization_id, property_id)
-    REFERENCES public.properties (organization_id, id)
+  CONSTRAINT follow_ups_property_id_fkey
+    FOREIGN KEY (property_id)
+    REFERENCES public.properties (id)
     ON DELETE SET NULL
 );
 
@@ -167,29 +204,43 @@ CREATE INDEX IF NOT EXISTS idx_activities_organization_id ON public.activities (
 CREATE INDEX IF NOT EXISTS idx_activities_org_created_at ON public.activities (organization_id, created_at DESC);
 
 DROP TRIGGER IF EXISTS trg_properties_org_immutable ON public.properties;
-CREATE TRIGGER trg_properties_org_immutable
-  BEFORE UPDATE ON public.properties
+CREATE TRIGGER trg_properties_org_immutable BEFORE UPDATE ON public.properties
   FOR EACH ROW EXECUTE PROCEDURE private.prevent_organization_id_change();
+DROP TRIGGER IF EXISTS trg_properties_created_by_immutable ON public.properties;
+CREATE TRIGGER trg_properties_created_by_immutable BEFORE UPDATE ON public.properties
+  FOR EACH ROW EXECUTE PROCEDURE private.prevent_created_by_change();
 
 DROP TRIGGER IF EXISTS trg_clients_org_immutable ON public.clients;
-CREATE TRIGGER trg_clients_org_immutable
-  BEFORE UPDATE ON public.clients
+CREATE TRIGGER trg_clients_org_immutable BEFORE UPDATE ON public.clients
   FOR EACH ROW EXECUTE PROCEDURE private.prevent_organization_id_change();
+DROP TRIGGER IF EXISTS trg_clients_created_by_immutable ON public.clients;
+CREATE TRIGGER trg_clients_created_by_immutable BEFORE UPDATE ON public.clients
+  FOR EACH ROW EXECUTE PROCEDURE private.prevent_created_by_change();
 
 DROP TRIGGER IF EXISTS trg_needs_org_immutable ON public.needs;
-CREATE TRIGGER trg_needs_org_immutable
-  BEFORE UPDATE ON public.needs
+CREATE TRIGGER trg_needs_org_immutable BEFORE UPDATE ON public.needs
   FOR EACH ROW EXECUTE PROCEDURE private.prevent_organization_id_change();
+DROP TRIGGER IF EXISTS trg_needs_created_by_immutable ON public.needs;
+CREATE TRIGGER trg_needs_created_by_immutable BEFORE UPDATE ON public.needs
+  FOR EACH ROW EXECUTE PROCEDURE private.prevent_created_by_change();
 
 DROP TRIGGER IF EXISTS trg_follow_ups_org_immutable ON public.follow_ups;
-CREATE TRIGGER trg_follow_ups_org_immutable
-  BEFORE UPDATE ON public.follow_ups
+CREATE TRIGGER trg_follow_ups_org_immutable BEFORE UPDATE ON publicfollow_ups
   FOR EACH ROW EXECUTE PROCEDURE private.prevent_organization_id_change();
+DROP TRIGGER IF EXISTS trg_follow_ups_created_by_immutable ON public.follow_ups;
+CREATE TRIGGER trg_follow_ups_created_by_immutable BEFORE UPDATE ON public.follow_ups
+  FOR EACH ROW EXECUTE PROCEDURE private.prevent_created_by_change();
+DROP TRIGGER IF EXISTS trg_follow_ups_property_same_org ON public.follow_ups;
+CREATE TRIGGER trg_follow_ups_property_same_org
+  BEFORE INSERT OR UPDATE OF property_id, organization_id ON public.follow_ups
+  FOR EACH ROW EXECUTE PROCEDURE private.follow_ups_property_same_org();
 
 DROP TRIGGER IF EXISTS trg_activities_org_immutable ON public.activities;
-CREATE TRIGGER trg_activities_org_immutable
-  BEFORE UPDATE ON public.activities
+CREATE TRIGGER trg_activities_org_immutable BEFORE UPDATE ON public.activities
   FOR EACH ROW EXECUTE PROCEDURE private.prevent_organization_id_change();
+DROP TRIGGER IF EXISTS trg_activities_created_by_immutable ON public.activities;
+CREATE TRIGGER trg_activities_created_by_immutable BEFORE UPDATE ON public.activities
+  FOR EACH ROW EXECUTE PROCEDURE private.prevent_created_by_change();
 
 ALTER TABLE public.properties ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.clients ENABLE ROW LEVEL SECURITY;
