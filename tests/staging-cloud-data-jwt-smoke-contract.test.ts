@@ -95,12 +95,23 @@ describe("staging cloud data JWT smoke runner contract", () => {
 
   it("workflow is workflow_dispatch only and pinned to the cloud-data branch", () => {
     assert.match(workflow, /workflow_dispatch:/);
-    assert.doesNotMatch(workflow, /\bpush:\b/);
-    assert.doesNotMatch(workflow, /\bpull_request:\b/);
+    // Anchored multiline: reject real on: push / on: pull_request trigger keys
+    assert.doesNotMatch(workflow, /^[ \t]*push[ \t]*:/m);
+    assert.doesNotMatch(workflow, /^[ \t]*pull_request[ \t]*:/m);
     assert.match(workflow, /feat\/etehad-cloud-data-foundation-20261112/);
     assert.match(workflow, /confirm_staging_run/);
     assert.match(workflow, /etehad-staging-security/);
     assert.match(workflow, /node-version: "22"/);
     assert.match(workflow, /dezonafotwyvvghbccko/);
+  });
+
+  it("trigger-key regexes detect real push and pull_request keys", () => {
+    const samplePush = "on:\n  push:\n    branches: [main]\n";
+    const samplePr = "on:\n  pull_request:\n    branches: [main]\n";
+    const sampleDispatchOnly = "on:\n  workflow_dispatch:\n    inputs: {}\n";
+    assert.match(samplePush, /^[ \t]*push[ \t]*:/m);
+    assert.match(samplePr, /^[ \t]*pull_request[ \t]*:/m);
+    assert.doesNotMatch(sampleDispatchOnly, /^[ \t]*push[ \t]*:/m);
+    assert.doesNotMatch(sampleDispatchOnly, /^[ \t]*pull_request[ \t]*:/m);
   });
 });
