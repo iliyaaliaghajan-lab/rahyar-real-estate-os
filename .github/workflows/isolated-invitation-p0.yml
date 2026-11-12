@@ -108,7 +108,7 @@ jobs:
           chmod +x scripts/isolated-pg/run_tenant_isolation_p0.sh
           scripts/isolated-pg/run_tenant_isolation_p0.sh
 
-      - name: Cloud data foundation P0 (C1–C11)
+      - name: Cloud data foundation P0 (C1–C9)
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
