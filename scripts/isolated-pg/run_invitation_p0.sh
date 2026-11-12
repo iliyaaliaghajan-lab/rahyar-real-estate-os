@@ -140,7 +140,7 @@ psql_root -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datna
 psql_root -c "DROP DATABASE IF EXISTS $WORK_DB;" >/dev/null 2>&1 || true
 psql_root -c "CREATE DATABASE $WORK_DB;"
 
-log "Applying stubs + canonical timestamp migrations (Staging chronology)"
+log "Applying stubs + timestamp migrations including cloud data foundation"
 psql_db -f "$STUBS_DIR/00_auth_and_roles.sql" >/dev/null
 for f in \
   20261022230848_initial_multitenant.sql \
@@ -150,7 +150,8 @@ for f in \
   20261022230925_organization_invitations.sql \
   20261026115345_secure_invitation_privacy_and_validation.sql \
   20261027003152_invite_fk_indexes_and_single_org_create.sql \
-  20261029181022_rls_helper_schema_and_profile_policy_optimization.sql
+  20261029181022_rls_helper_schema_and_profile_policy_optimization.sql \
+  20261112120000_cloud_business_data_foundation.sql
 do
   log "  -> $f"
   psql_db -f "$MIGRATIONS_DIR/$f" >/dev/null
