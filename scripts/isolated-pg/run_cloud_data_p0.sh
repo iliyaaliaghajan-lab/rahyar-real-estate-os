@@ -196,7 +196,7 @@ set -e
 [[ $rc -ne 0 ]] || fail "activity DELETE must fail"
 pass "activities are append-only for authenticated"
 
-log "=== C7: follow_up same-org property OK ==="
+log "=== C7: follow_up same-org property OK; cross-org rejected ==="
 fid=$(extract_uuid "$(as_auth "$ua" "INSERT INTO public.follow_ups (organization_id, client_id, property_id, title, created_by, updated_by) VALUES ('$oa','$ca','$pa','FU','$ua','$ua') RETURNING id;")")
 [[ -n "$fid" ]] || fail "same-org follow_up insert failed"
 set +e
@@ -208,6 +208,43 @@ err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_D
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || fail "cross-org property on follow_up must fail"
-pass "follow_up property composite FK enforced"
+pass "follow_up property same-org enforced"
 
-log "ALL CLOUD DATA P0 CHECKS PASSED"
+log "=== C8: created_by immutable after insert ==="
+set +e
+err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+  BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$ua');
+  UPDATE public.clients SET created_by = '$ub', updated_by = '$ua' WHERE id = '$ca';
+  COMMIT;" 2>&1)
+rc=$?
+set -e
+[[ $rc -ne 0 ]] || fail "created_by change must fail"
+final_cb=$(q "SELECT created_by::text FROM public.clients WHERE id = '$ca';")
+[[ "$final_cb" == "$ua" ]] || fail "created_by changed unexpectedly to $final_cb"
+pass "created_by immutable"
+
+log "=== C9: property DELETE sets follow_ups.property_id NULL; org_id unchanged ==="
+cur=$(q "SELECT property_id::text FROM public.follow_ups WHERE id = '$fid';")
+[[ "$cur" == "$pa" ]] || fail "precondition: follow_up should reference pa"
+n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At -c "
+  DO \$\$
+  DECLARE n int;
+  BEGIN
+    PERFORM set_config('role', 'authenticated', true);
+    PERFORM auth.set_test_uid('$ua');
+    DELETE FROM public.properties WHERE id = '$pa';
+    GET DIAGNOSTICS n = ROW_COUNT;
+    PERFORM set_config('role', 'none', true);
+    RAISE NOTICE 'deleted=%', n;
+  END \$\$;
+" 2>&1 | grep -oE 'deleted=[0-9]+' | cut -d= -f2)
+[[ "${n:-0}" == "1" ]] || fail "property DELETE should affect 1, got ${n:-none}"
+prop_left=$(q "SELECT count(*) FROM public.properties WHERE id = '$pa';")
+[[ "$prop_left" == "0" ]] || fail "property row should be gone"
+fu_prop=$(q "SELECT property_id::text FROM public.follow_ups WHERE id = '$fid';")
+[[ "$fu_prop" == "" ]] || fail "follow_ups.property_id should be NULL after property delete, got $fu_prop"
+fu_org=$(q "SELECT organization_id::text FROM public.follow_ups WHERE id = '$fid';")
+[[ "$fu_org" == "$oa" ]] || fail "follow_ups.organization_id must stay $oa, got $fu_org"
+pass "property ON DELETE SET NULL; organization_id unchanged"
+
+log "ALL CLOUD DATA P0 CHECKS PASSED (C1–C9)"
