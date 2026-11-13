@@ -272,7 +272,7 @@ vol=$(q "SELECT p.provolatile FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pr
 sp_count=$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, LATERAL pg_options_to_table(p.proconfig) opt WHERE n.nspname='private' AND p.proname='user_can_delete_business_data' AND opt.option_name = 'search_path';")
 [[ "$sp_count" == "1" ]] || fail "helper must have a search_path function setting (got count=$sp_count)"
 sp_val=$(q "SELECT opt.option_value FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, LATERAL pg_options_to_table(p.proconfig) opt WHERE n.nspname='private' AND p.proname='user_can_delete_business_data' AND opt.option_name = 'search_path';")
-[[ "$sp_val" == "" ]] || fail "helper search_path must be exactly empty, got '$sp_val'"
+[[ "$sp_val" == '""' ]] || fail "helper search_path is not encoded as an empty value in pg_proc catalog (got '$sp_val')"
 pub_exec=$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE n.nspname='private' AND p.proname='user_can_delete_business_data' AND a.grantee = 0 AND a.privilege_type = 'EXECUTE';")
 [[ "$pub_exec" == "0" ]] || fail "PUBLIC must not have EXECUTE on helper (acl count=$pub_exec)"
 anon_exec=$(q "SELECT has_function_privilege('anon', 'private.user_can_delete_business_data(uuid)', 'EXECUTE')::text;")
