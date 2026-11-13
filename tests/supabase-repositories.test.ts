@@ -27,7 +27,10 @@ import {
   propertyInsertRow,
   propertyUpdateRow,
 } from '../src/lib/repositories/supabaseMappers';
-import { createSupabaseRepositories } from '../src/lib/repositories/supabaseRepositories';
+import {
+  createSupabaseRepositories,
+  SUPABASE_LIST_PAGE_SIZE,
+} from '../src/lib/repositories/supabaseRepositories';
 import { repositories } from '../src/lib/repositories/index';
 import { dexieRepositories } from '../src/lib/repositories/dexieRepositories';
 import type { PropertyInput, ClientInput, NeedInput, FollowUpInput } from '../src/types';
@@ -286,9 +289,25 @@ describe('supabaseMappers — client / need / followUp / activity', () => {
 
 type TableName = 'properties' | 'clients' | 'needs' | 'follow_ups' | 'activities';
 
+type SelectMeta = {
+  range?: { from: number; to: number };
+  wantCount: boolean;
+  orders: Array<{ column: string; ascending: boolean }>;
+};
+
+type SelectResult = {
+  data: unknown;
+  error: null | { message: string };
+  count?: number | null;
+};
+
 function makeMockClient(handlers: {
   onInsert?: (table: TableName, payload: unknown) => { data: unknown; error: null | { message: string } };
-  onSelect?: (table: TableName, filters: Record<string, string>) => { data: unknown; error: null | { message: string } };
+  onSelect?: (
+    table: TableName,
+    filters: Record<string, string>,
+    meta?: SelectMeta,
+  ) => SelectResult;
   onUpdate?: (table: TableName, payload: unknown, filters: Record<string, string>) => { data: unknown; error: null | { message: string } };
   onDelete?: (table: TableName, filters: Record<string, string>) => { data: unknown; error: null | { message: string } };
 }) {
@@ -296,18 +315,33 @@ function makeMockClient(handlers: {
   let table: TableName = 'properties';
   let mode: 'select' | 'insert' | 'update' | 'delete' = 'select';
   let payload: unknown;
+  let rangeFrom: number | undefined;
+  let rangeTo: number | undefined;
+  let wantCount = false;
+  let orders: Array<{ column: string; ascending: boolean }> = [];
 
   const builder: Record<string, unknown> = {};
   const self = () => builder;
+
+  const resetSelectState = () => {
+    rangeFrom = undefined;
+    rangeTo = undefined;
+    wantCount = false;
+    orders = [];
+  };
 
   builder.from = (t: TableName) => {
     table = t;
     Object.keys(filters).forEach((k) => delete filters[k]);
     mode = 'select';
     payload = undefined;
+    resetSelectState();
     return builder;
   };
-  builder.select = () => self();
+  builder.select = (_cols?: string, opts?: { count?: string }) => {
+    wantCount = opts?.count === 'exact';
+    return builder;
+  };
   builder.insert = (p: unknown) => {
     mode = 'insert';
     payload = p;
@@ -326,10 +360,26 @@ function makeMockClient(handlers: {
     filters[col] = val;
     return builder;
   };
-  builder.order = () => self();
+  builder.order = (column: string, opts?: { ascending?: boolean }) => {
+    orders.push({ column, ascending: opts?.ascending !== false });
+    return builder;
+  };
   builder.limit = () => self();
+  builder.range = (from: number, to: number) => {
+    rangeFrom = from;
+    rangeTo = to;
+    return builder;
+  };
   builder.maybeSingle = async () => {
-    if (mode === 'select') return handlers.onSelect?.(table, { ...filters }) ?? { data: null, error: null };
+    if (mode === 'select') {
+      return (
+        handlers.onSelect?.(table, { ...filters }, {
+          range: rangeFrom !== undefined ? { from: rangeFrom, to: rangeTo! } : undefined,
+          wantCount,
+          orders: [...orders],
+        }) ?? { data: null, error: null }
+      );
+    }
     if (mode === 'update') return handlers.onUpdate?.(table, payload, { ...filters }) ?? { data: null, error: null };
     return { data: null, error: null };
   };
@@ -339,7 +389,15 @@ function makeMockClient(handlers: {
   };
   builder.then = undefined;
   const run = async () => {
-    if (mode === 'select') return handlers.onSelect?.(table, { ...filters }) ?? { data: [], error: null };
+    if (mode === 'select') {
+      return (
+        handlers.onSelect?.(table, { ...filters }, {
+          range: rangeFrom !== undefined ? { from: rangeFrom, to: rangeTo! } : undefined,
+          wantCount,
+          orders: [...orders],
+        }) ?? { data: [], error: null }
+      );
+    }
     if (mode === 'insert') return handlers.onInsert?.(table, payload) ?? { data: null, error: { message: 'no handler' } };
     if (mode === 'update') return handlers.onUpdate?.(table, payload, { ...filters }) ?? { data: null, error: null };
     if (mode === 'delete') return handlers.onDelete?.(table, { ...filters }) ?? { data: [], error: null };
@@ -475,23 +533,21 @@ describe('createSupabaseRepositories — CRUD with mocks', () => {
         onSelect: (table, filters) => {
           assert.equal(table, 'clients');
           assert.equal(filters.organization_id, ORG);
-          return {
-            data: [
-              {
-                id: CLIENT_ID,
-                organization_id: ORG,
-                name: 'C1',
-                phone: '09',
-                notes: '',
-                tags: ['a'],
-                created_by: USER,
-                updated_by: USER,
-                created_at: iso,
-                updated_at: iso,
-              },
-            ],
-            error: null,
-          };
+          const data = [
+            {
+              id: CLIENT_ID,
+              organization_id: ORG,
+              name: 'C1',
+              phone: '09',
+              notes: '',
+              tags: ['a'],
+              created_by: USER,
+              updated_by: USER,
+              created_at: iso,
+              updated_at: iso,
+            },
+          ];
+          return { data, error: null, count: data.length };
         },
       }),
     });
@@ -566,8 +622,8 @@ describe('createSupabaseRepositories — CRUD with mocks', () => {
     const repos = createSupabaseRepositories({
       getMembership: async () => membership,
       supabase: makeMockClient({
-        onSelect: () => ({
-          data: [
+        onSelect: () => {
+          const data = [
             {
               id: PROP_ID,
               organization_id: ORG,
@@ -594,9 +650,9 @@ describe('createSupabaseRepositories — CRUD with mocks', () => {
               created_at: iso,
               updated_at: iso,
             },
-          ],
-          error: null,
-        }),
+          ];
+          return { data, error: null, count: data.length };
+        },
       }),
     });
     const hits = await repos.properties.search('مغازه');
@@ -737,6 +793,240 @@ describe('createSupabaseRepositories — best-effort activity', () => {
     });
     assert.equal(row.id, PROP_ID);
     assert.equal(row.title, 'P1');
+  });
+});
+
+describe('createSupabaseRepositories — pagination', () => {
+  const membership = {
+    organizationId: ORG,
+    organizationName: 'Org A',
+    role: 'owner' as const,
+    userId: USER,
+  };
+  const iso = '2026-03-01T12:00:00.000Z';
+
+  function propRow(i: number, title?: string) {
+    const id = `11111111-1111-4111-8111-${String(i).padStart(12, '0')}`;
+    return {
+      id,
+      organization_id: ORG,
+      title: title ?? `P${i}`,
+      transaction_type: 'sale' as const,
+      property_type: 'apartment' as const,
+      area: null,
+      bedrooms: null,
+      location: '',
+      neighborhood: '',
+      price: null,
+      deposit: null,
+      rent: null,
+      floor: null,
+      total_floors: null,
+      parking: null,
+      elevator: null,
+      storage: null,
+      description: '',
+      contact_name: '',
+      contact_phone: '',
+      created_by: USER,
+      updated_by: USER,
+      created_at: iso,
+      updated_at: iso,
+    };
+  }
+
+  function pagedSelect(
+    all: ReturnType<typeof propRow>[],
+    maxRowsPerResponse?: number,
+    failAtOffset?: number,
+  ) {
+    const calls: Array<{ from: number; to: number; wantCount: boolean; filters: Record<string, string>; orders: SelectMeta['orders'] }> = [];
+    return {
+      calls,
+      onSelect: (table: TableName, filters: Record<string, string>, meta?: SelectMeta) => {
+        assert.equal(table, 'properties');
+        assert.equal(filters.organization_id, ORG);
+        assert.ok(meta?.range, 'range required');
+        const from = meta!.range!.from;
+        const to = meta!.range!.to;
+        calls.push({ from, to, wantCount: !!meta?.wantCount, filters: { ...filters }, orders: meta?.orders ?? [] });
+        if (failAtOffset !== undefined && from === failAtOffset) {
+          return { data: null, error: { message: 'page failed' }, count: null };
+        }
+        let slice = all.slice(from, to + 1);
+        if (maxRowsPerResponse !== undefined) {
+          slice = slice.slice(0, maxRowsPerResponse);
+        }
+        return {
+          data: slice,
+          error: null,
+          count: meta?.wantCount ? all.length : null,
+        };
+      },
+    };
+  }
+
+  it('fetches more than one page and keeps later rows', async () => {
+    const total = SUPABASE_LIST_PAGE_SIZE + 50;
+    const all = Array.from({ length: total }, (_, i) => propRow(i));
+    const { calls, onSelect } = pagedSelect(all);
+    const repos = createSupabaseRepositories({
+      getMembership: async () => membership,
+      supabase: makeMockClient({ onSelect }),
+    });
+    const list = await repos.properties.list();
+    assert.equal(list.length, total);
+    assert.equal(list[0].title, 'P0');
+    assert.equal(list[SUPABASE_LIST_PAGE_SIZE].title, `P${SUPABASE_LIST_PAGE_SIZE}`);
+    assert.equal(list[total - 1].title, `P${total - 1}`);
+    assert.ok(calls.length >= 2, `expected multi-page calls, got ${calls.length}`);
+    assert.equal(calls[0].from, 0);
+    assert.equal(calls[0].to, SUPABASE_LIST_PAGE_SIZE - 1);
+    assert.equal(calls[0].wantCount, true);
+    assert.equal(calls[1].from, SUPABASE_LIST_PAGE_SIZE);
+    assert.equal(calls[1].wantCount, false);
+  });
+
+  it('handles exact page-size multiple', async () => {
+    const total = SUPABASE_LIST_PAGE_SIZE * 2;
+    const all = Array.from({ length: total }, (_, i) => propRow(i));
+    const { calls, onSelect } = pagedSelect(all);
+    const repos = createSupabaseRepositories({
+      getMembership: async () => membership,
+      supabase: makeMockClient({ onSelect }),
+    });
+    const list = await repos.properties.list();
+    assert.equal(list.length, total);
+    assert.equal(calls.length, 2);
+  });
+
+  it('advances by actual rows when Max Rows < page size', async () => {
+    const total = 1200;
+    const maxRows = 400;
+    const all = Array.from({ length: total }, (_, i) => propRow(i));
+    const { calls, onSelect } = pagedSelect(all, maxRows);
+    const repos = createSupabaseRepositories({
+      getMembership: async () => membership,
+      supabase: makeMockClient({ onSelect }),
+    });
+    const list = await repos.properties.list();
+    assert.equal(list.length, total);
+    assert.ok(calls.length >= 3, `expected >=3 pages, got ${calls.length}`);
+    assert.equal(calls[1].from, maxRows);
+  });
+
+  it('fails closed when a later page errors (no partial success)', async () => {
+    const total = SUPABASE_LIST_PAGE_SIZE + 10;
+    const all = Array.from({ length: total }, (_, i) => propRow(i));
+    const { onSelect } = pagedSelect(all, undefined, SUPABASE_LIST_PAGE_SIZE);
+    const repos = createSupabaseRepositories({
+      getMembership: async () => membership,
+      supabase: makeMockClient({ onSelect }),
+    });
+    await assert.rejects(() => repos.properties.list(), /page failed|list page/);
+  });
+
+  it('preserves organization filter and secondary id order on every page', async () => {
+    const total = SUPABASE_LIST_PAGE_SIZE + 1;
+    const all = Array.from({ length: total }, (_, i) => propRow(i));
+    const { calls, onSelect } = pagedSelect(all);
+    const repos = createSupabaseRepositories({
+      getMembership: async () => membership,
+      supabase: makeMockClient({ onSelect }),
+    });
+    await repos.properties.list();
+    for (const c of calls) {
+      assert.equal(c.filters.organization_id, ORG);
+      const cols = c.orders.map((o) => o.column);
+      assert.ok(cols.includes('updated_at'), 'primary order');
+      assert.ok(cols.includes('id'), 'secondary id order');
+    }
+  });
+
+  it('listByClient keeps client_id filter across pages', async () => {
+    const total = SUPABASE_LIST_PAGE_SIZE + 3;
+    const all = Array.from({ length: total }, (_, i) => ({
+      id: `33333333-3333-4333-8333-${String(i).padStart(12, '0')}`,
+      organization_id: ORG,
+      client_id: CLIENT_ID,
+      transaction_type: 'sale' as const,
+      property_type: null,
+      min_area: null,
+      max_area: null,
+      bedrooms: null,
+      location: '',
+      max_price: null,
+      max_deposit: null,
+      max_rent: null,
+      notes: '',
+      created_by: USER,
+      updated_by: USER,
+      created_at: iso,
+      updated_at: iso,
+    }));
+    const calls: Array<Record<string, string>> = [];
+    const repos = createSupabaseRepositories({
+      getMembership: async () => membership,
+      supabase: makeMockClient({
+        onSelect: (table, filters, meta) => {
+          assert.equal(table, 'needs');
+          calls.push({ ...filters });
+          const from = meta!.range!.from;
+          const to = meta!.range!.to;
+          const slice = all.slice(from, to + 1);
+          return { data: slice, error: null, count: meta?.wantCount ? all.length : null };
+        },
+      }),
+    });
+    const list = await repos.needs.listByClient(CLIENT_ID);
+    assert.equal(list.length, total);
+    assert.ok(calls.length >= 2);
+    for (const f of calls) {
+      assert.equal(f.organization_id, ORG);
+      assert.equal(f.client_id, CLIENT_ID);
+    }
+  });
+
+  it('search finds a row that only exists on page 2+', async () => {
+    const total = SUPABASE_LIST_PAGE_SIZE + 5;
+    const all = Array.from({ length: total }, (_, i) => propRow(i));
+    all[SUPABASE_LIST_PAGE_SIZE + 2] = propRow(SUPABASE_LIST_PAGE_SIZE + 2, 'مغازه ویژه صفحه دوم');
+    const { onSelect } = pagedSelect(all);
+    const repos = createSupabaseRepositories({
+      getMembership: async () => membership,
+      supabase: makeMockClient({ onSelect }),
+    });
+    const hits = await repos.properties.search('مغازه');
+    assert.equal(hits.length, 1);
+    assert.match(hits[0].title, /مغازه/);
+  });
+
+  it('activities.recent still uses limit only (not multi-page list)', async () => {
+    const repos = createSupabaseRepositories({
+      getMembership: async () => membership,
+      supabase: makeMockClient({
+        onSelect: (table, filters, meta) => {
+          assert.equal(table, 'activities');
+          assert.equal(filters.organization_id, ORG);
+          assert.equal(meta?.range, undefined);
+          return {
+            data: [
+              {
+                id: ACT_ID,
+                organization_id: ORG,
+                type: 'property',
+                text: 't',
+                created_by: USER,
+                created_at: iso,
+              },
+            ],
+            error: null,
+          };
+        },
+      }),
+    });
+    const recent = await repos.activities.recent(5);
+    assert.equal(recent.length, 1);
   });
 });
 
