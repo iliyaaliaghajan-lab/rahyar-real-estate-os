@@ -138,35 +138,47 @@ async function fetchAllPages<TRow>(
   const results: TRow[] = [];
   let offset = 0;
   let total: number | null = null;
+  let requestExactCount = true;
 
   while (true) {
-    let q = sb
+    // requestExactCount is a plain boolean flag (not derived from total) so the
+    // select options and the awaited count field do not form a TS control-flow cycle.
+    const selectOpts = requestExactCount
+      ? ({ count: 'exact' } as const)
+      : ({} as const);
+
+    let builder = sb
       .from(table)
-      .select('*', total === null ? { count: 'exact' } : {})
+      .select('*', selectOpts)
       .eq('organization_id', organizationId);
 
     for (const [col, val] of extraEq) {
-      q = q.eq(col, val);
+      builder = builder.eq(col, val);
     }
     for (const o of orders) {
-      q = q.order(o.column, { ascending: o.ascending });
+      builder = builder.order(o.column, { ascending: o.ascending });
     }
     // Deterministic secondary key when primary order is not id alone
     if (!orders.some((o) => o.column === 'id')) {
-      q = q.order('id', { ascending: true });
+      builder = builder.order('id', { ascending: true });
     }
 
     const to = offset + SUPABASE_LIST_PAGE_SIZE - 1;
-    q = q.range(offset, to);
+    const page = builder.range(offset, to);
 
-    const { data, error, count } = await q;
+    const { data, error, count } = await page;
     throwIfError(error, `${table} list page at offset ${offset}`);
 
-    if (total === null) {
+    if (requestExactCount) {
       if (typeof count !== 'number' || count < 0) {
         throw new Error(`${table} list: exact total count unavailable`);
       }
       total = count;
+      requestExactCount = false;
+    }
+    // After the first successful page, total is always a non-negative number.
+    if (total === null) {
+      throw new Error(`${table} list: total count was not established`);
     }
 
     const rows = (data ?? []) as TRow[];
