@@ -9,11 +9,13 @@ on:
       - ai/etehad-integration-dryrun-20261030
       - feat/etehad-next16-upgrade
       - feat/etehad-branding-pwa-icons-20261105
+      - feat/etehad-cloud-data-foundation-20261112
   push:
     branches:
       - feat/etehad-secure-invitations-and-rls
       - feat/etehad-next16-upgrade
       - feat/etehad-cloud-data-foundation-20261112
+      - feat/etehad-supabase-repository-adapter-20261113
 
 jobs:
   check:
