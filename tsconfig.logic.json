@@ -1,8 +1,27 @@
 {
   "compilerOptions": {
-    "target": "ES2020", "lib": ["esnext"], "strict": true, "noEmit": true,
-    "module": "esnext", "moduleResolution": "bundler", "skipLibCheck": true,
-    "types": ["node"]
+    "target": "ES2020",
+    "lib": ["esnext"],
+    "strict": true,
+    "noEmit": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "types": ["node"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
-  "include": ["src/types", "src/lib/utils", "src/lib/parser", "src/lib/matching", "src/lib/ai", "tests"]
+  "include": [
+    "src/types",
+    "src/lib/utils",
+    "src/lib/parser",
+    "src/lib/matching",
+    "src/lib/ai",
+    "src/lib/repositories",
+    "src/lib/auth/organization.ts",
+    "src/lib/supabase/client.ts",
+    "src/lib/db/db.ts",
+    "tests"
+  ]
 }
