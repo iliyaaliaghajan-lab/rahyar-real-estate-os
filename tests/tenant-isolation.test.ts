@@ -94,3 +94,418 @@ describe('role module (unit — real TypeScript exports)', () => {
     assert.equal(ROLE_PERMISSIONS.agent.canManageBusinessData, true);
   });
 });
+
+describe('migration 003 create_organization_with_owner (static SQL contract)', () => {
+  it('defines create_organization_with_owner with single text parameter p_name', () => {
+    assert.match(sql003, /create_organization_with_owner\s*\(\s*p_name\s+text\s*\)/i);
+  });
+
+  it('binds membership user_id to auth.uid() not a client parameter', () => {
+    assert.match(sql003, /v_uid\s+uuid\s*:=\s*auth\.uid\(\)/);
+    assert.match(sql003, /v_org_id,\s*\n\s*v_uid,\s*\n\s*'owner'/);
+  });
+
+  it('hard-codes role owner and status active in the function body', () => {
+    assert.match(sql003, /'owner'/);
+    assert.match(sql003, /'active'/);
+    assert.doesNotMatch(sql003, /p_role|p_user_id|p_status/);
+  });
+
+  it('is SECURITY DEFINER with empty search_path', () => {
+    assert.match(
+      sql003,
+      /create_organization_with_owner[\s\S]*?security definer[\s\S]*?set search_path\s*=\s*''/i,
+    );
+  });
+
+  it('revokes execute from public and anon; grants execute to authenticated', () => {
+    assert.match(
+      sql003,
+      /revoke all on function public\.create_organization_with_owner\(text\) from public/i,
+    );
+    assert.match(
+      sql003,
+      /revoke all on function public\.create_organization_with_owner\(text\) from anon/i,
+    );
+    assert.match(
+      sql003,
+      /grant execute on function public\.create_organization_with_owner\(text\) to authenticated/i,
+    );
+  });
+
+  it('raises when not authenticated', () => {
+    assert.match(sql003, /if v_uid is null then\s*raise exception 'Not authenticated'/i);
+  });
+});
+
+describe('migration 006 single-org create and invitation FK indexes', () => {
+  it('replaces create_organization_with_owner with active-membership guard', () => {
+    assert.match(sql006, /User already has an active organization membership/);
+    assert.match(sql006, /v_active_count > 0/);
+  });
+
+  it('keeps SECURITY DEFINER empty search_path and auth.uid identity', () => {
+    assert.match(
+      sql006,
+      /create_organization_with_owner[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
+    );
+    assert.match(sql006, /v_uid uuid := auth\.uid\(\)/);
+  });
+
+  it('adds covering indexes for invitation FK columns', () => {
+    assert.match(sql006, /idx_org_invitations_invited_by/);
+    assert.match(sql006, /idx_org_invitations_accepted_by/);
+  });
+});
+
+describe('migration 001 table privilege intent (static SQL contract)', () => {
+  it('revokes all on organizations from public, anon, and authenticated before select grant', () => {
+    assert.match(sql001, /revoke all on table public\.organizations from public/i);
+    assert.match(sql001, /revoke all on table public\.organizations from anon/i);
+    assert.match(sql001, /revoke all on table public\.organizations from authenticated/i);
+    assert.match(sql001, /grant select on table public\.organizations to authenticated/i);
+  });
+
+  it('does not grant insert on organizations or organization_members to authenticated', () => {
+    assert.doesNotMatch(
+      sql001,
+      /grant\s+insert[^;]*on table public\.organizations to authenticated/i,
+    );
+    assert.doesNotMatch(
+      sql001,
+      /grant\s+insert[^;]*on table public\.organization_members to authenticated/i,
+    );
+  });
+
+  it('profiles: grant select, update only to authenticated (no insert grant)', () => {
+    assert.match(sql001, /grant select, update on table public\.profiles to authenticated/i);
+    assert.doesNotMatch(
+      sql001,
+      /grant\s+insert[^;]*on table public\.profiles to authenticated/i,
+    );
+  });
+});
+
+describe('migration 004 profile trigger (static SQL contract)', () => {
+  it('defines handle_new_user as SECURITY DEFINER with empty search_path', () => {
+    assert.match(
+      sql004,
+      /handle_new_user[\s\S]*?SECURITY DEFINER[\s\S]*?search_path\s*=\s*''/i,
+    );
+  });
+
+  it('inserts profiles.id from NEW.id only', () => {
+    assert.match(sql004, /INSERT INTO public\.profiles\s*\(\s*id,/i);
+    assert.match(sql004, /VALUES\s*\(\s*NEW\.id,/i);
+  });
+
+  it('uses ON CONFLICT DO NOTHING for existing profiles', () => {
+    assert.match(sql004, /ON CONFLICT\s*\(\s*id\s*\)\s*DO NOTHING/i);
+  });
+
+  it('revokes execute from PUBLIC, anon, and authenticated', () => {
+    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM PUBLIC/i);
+    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM anon/i);
+    assert.match(sql004, /REVOKE ALL ON FUNCTION public\.handle_new_user\(\) FROM authenticated/i);
+  });
+
+  it('does not contain executable ALTER DEFAULT PRIVILEGES statements', () => {
+    const executable = sql004
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n');
+    assert.doesNotMatch(executable, /ALTER\s+DEFAULT\s+PRIVILEGES/i);
+  });
+});
+
+describe('migration 005 invitations (static SQL contract)', () => {
+  it('forbids owner role on invitations via check constraint', () => {
+    assert.match(sql005, /invitation_role_not_owner CHECK \(role IN \('admin', 'agent'\)\)/);
+  });
+
+  it('create_organization_invitation only allows admin and agent roles', () => {
+    assert.match(sql005, /p_role NOT IN \('admin', 'agent'\)/);
+  });
+
+  it('create invitation requires caller owner or admin', () => {
+    assert.match(sql005, /v_caller_role NOT IN \('owner', 'admin'\)/);
+  });
+
+  it('create invitation fails closed when zero active memberships', () => {
+    assert.match(sql005, /v_active_count = 0/);
+    assert.match(sql005, /No active organization membership/);
+  });
+
+  it('create invitation fails closed when multiple active memberships (no ORDER BY LIMIT 1)', () => {
+    assert.match(sql005, /v_active_count > 1/);
+    assert.match(sql005, /Multiple active organization memberships/);
+    assert.doesNotMatch(
+      sql005,
+      /ORDER BY om\.joined_at NULLS LAST, om\.created_at\s*\n\s*LIMIT 1/,
+    );
+  });
+
+  it('stores token_hash and uses digest', () => {
+    assert.match(sql005, /token_hash text NOT NULL/);
+    assert.match(sql005, /extensions\.digest\(/);
+  });
+
+  it('accept rejects email mismatch', () => {
+    assert.match(sql005, /Email does not match invitation/);
+  });
+
+  it('accept rejects already accepted and enforces expires_at without UPDATE then RAISE', () => {
+    assert.match(sql005, /Invitation already accepted/);
+    assert.match(sql005, /expires_at < now\(\)/);
+    assert.match(sql005, /Invitation expired/);
+    assert.doesNotMatch(
+      sql005,
+      /SET status = 'expired'[\s\S]{0,120}RAISE EXCEPTION 'Invitation expired'/,
+    );
+  });
+
+  it('accept rejects when membership row already exists; does not ON CONFLICT DO UPDATE', () => {
+    assert.match(sql005, /Membership already exists/);
+    assert.doesNotMatch(
+      sql005,
+      /ON CONFLICT\s*\(\s*organization_id\s*,\s*user_id\s*\)\s*DO UPDATE/i,
+    );
+    assert.doesNotMatch(sql005, /EXCLUDED\.role/);
+  });
+
+  it('enforces at most one active membership per user at index level', () => {
+    assert.match(
+      sql005,
+      /idx_org_members_one_active_per_user[\s\S]*?organization_members \(user_id\)[\s\S]*?status = 'active'/,
+    );
+  });
+
+  it('invite RPCs are SECURITY DEFINER with empty search_path', () => {
+    assert.match(
+      sql005,
+      /create_organization_invitation[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
+    );
+    assert.match(
+      sql005,
+      /accept_organization_invitation[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
+    );
+  });
+});
+
+describe('migration 007 invitation privacy and create validation (static SQL contract)', () => {
+  it('revokes direct table access from PUBLIC, anon, and authenticated', () => {
+    assert.match(sql007, /REVOKE ALL ON TABLE public\.organization_invitations FROM PUBLIC/);
+    assert.match(sql007, /REVOKE ALL ON TABLE public\.organization_invitations FROM anon/);
+    assert.match(sql007, /REVOKE ALL ON TABLE public\.organization_invitations FROM authenticated/);
+  });
+
+  it('drops the Members can view org invitations policy', () => {
+    assert.match(
+      sql007,
+      /DROP POLICY IF EXISTS "Members can view org invitations" ON public\.organization_invitations/,
+    );
+  });
+
+  it('does not re-grant SELECT on organization_invitations to authenticated', () => {
+    assert.doesNotMatch(
+      sql007,
+      /GRANT SELECT ON TABLE public\.organization_invitations TO authenticated/,
+    );
+  });
+
+  it('create_organization_invitation rejects any same-org membership for target email', () => {
+    assert.match(sql007, /Membership already exists for this email in the organization/);
+    assert.match(
+      sql007,
+      /om\.organization_id = v_org_id[\s\S]*?lower\(u\.email\) = v_email/,
+    );
+  });
+
+  it('create_organization_invitation rejects active membership in another org', () => {
+    assert.match(sql007, /User already belongs to another organization/);
+    assert.match(
+      sql007,
+      /om\.status = 'active'[\s\S]*?om\.organization_id <> v_org_id/,
+    );
+  });
+
+  it('keeps SECURITY DEFINER, empty search_path, and authenticated-only EXECUTE', () => {
+    assert.match(
+      sql007,
+      /create_organization_invitation[\s\S]*?SECURITY DEFINER[\s\S]*?search_path = ''/,
+    );
+    assert.match(
+      sql007,
+      /REVOKE ALL ON FUNCTION public\.create_organization_invitation\(text, public\.member_role\) FROM PUBLIC/,
+    );
+    assert.match(
+      sql007,
+      /REVOKE ALL ON FUNCTION public\.create_organization_invitation\(text, public\.member_role\) FROM anon/,
+    );
+    assert.match(
+      sql007,
+      /GRANT EXECUTE ON FUNCTION public\.create_organization_invitation\(text, public\.member_role\) TO authenticated/,
+    );
+  });
+
+  it('preserves caller exactly-one-active-membership and owner\/admin gate', () => {
+    assert.match(sql007, /v_active_count = 0/);
+    assert.match(sql007, /No active organization membership/);
+    assert.match(sql007, /v_active_count > 1/);
+    assert.match(sql007, /Multiple active organization memberships/);
+    assert.match(sql007, /v_caller_role NOT IN \('owner', 'admin'\)/);
+  });
+});
+
+describe('app signup / onboarding / invite sources (static)', () => {
+  it('login uses signInWithOtp and does not write to profiles', () => {
+    assert.match(loginSrc, /signInWithOtp/);
+    assert.doesNotMatch(loginSrc, /from\(['"]profiles['"]\)/);
+    assert.doesNotMatch(loginSrc, /\.insert\(/);
+  });
+
+  it('auth callback exchanges code for session only and does not write profiles', () => {
+    assert.match(callbackSrc, /exchangeCodeForSession/);
+    assert.doesNotMatch(callbackSrc, /from\(['"]profiles['"]\)/);
+  });
+
+  it('onboarding RPC passes only p_name to create_organization_with_owner', () => {
+    assert.match(onboardingSrc, /rpc\(\s*['"]create_organization_with_owner['"]/);
+    assert.match(onboardingSrc, /p_name:\s*name\.trim\(\)/);
+    assert.doesNotMatch(onboardingSrc, /p_user_id|p_role|user_id:\s*|role:\s*['"]owner['"]/);
+  });
+
+  it('invite page calls create_organization_invitation RPC', () => {
+    assert.match(inviteSrc, /create_organization_invitation/);
+    assert.match(inviteSrc, /p_email/);
+    assert.match(inviteSrc, /p_role/);
+  });
+
+  it('invite UI states that email is not sent automatically', () => {
+    assert.match(inviteSrc, /ایمیل خودکار ارسال نمی‌کند/);
+    assert.doesNotMatch(inviteSrc, /لینک ورود به ایمیل شما ارسال شد/);
+  });
+
+  it('invite link uses fragment token, not query token', () => {
+    assert.match(inviteSrc, /buildInviteAcceptUrl/);
+    assert.doesNotMatch(inviteSrc, /\/invite\/accept\?token=/);
+  });
+
+  it('accept page calls accept_organization_invitation with token', () => {
+    assert.match(acceptSrc, /accept_organization_invitation/);
+    assert.match(acceptSrc, /p_token/);
+    assert.match(acceptSrc, /parseInviteTokenFromHash/);
+    assert.match(acceptSrc, /hasLegacyTokenQuery/);
+    assert.match(acceptSrc, /history\.replaceState/);
+    // Must not read token from query search params
+    assert.doesNotMatch(acceptSrc, /searchParams\.get\(['"]token['"]\)/);
+    // Unauthenticated path must not embed token in next
+    assert.doesNotMatch(acceptSrc, /next=.*token/);
+    assert.doesNotMatch(acceptSrc, /\/invite\/accept\?token=/);
+  });
+
+  it('getCurrentMembership refuses multiple active orgs', () => {
+    assert.match(orgSrc, /multiple active memberships/);
+    assert.match(orgSrc, /data\.length > 1/);
+  });
+
+  it('login and callback guard next path against open redirect and token leakage', () => {
+    assert.match(loginSrc, /safeNextPath/);
+    assert.match(callbackSrc, /safeNextPath/);
+    assert.match(loginSrc, /@\/lib\/auth\/inviteUrl/);
+    assert.match(callbackSrc, /@\/lib\/auth\/inviteUrl/);
+  });
+});
+
+const sql011 = readRepo(
+  'supabase/migrations/20261113212202_role_based_business_delete_permissions.sql',
+);
+
+describe('migration 011 role-based business delete (static SQL contract)', () => {
+  it('defines private.user_can_delete_business_data(uuid) as SECURITY DEFINER with empty search_path', () => {
+    assert.match(
+      sql011,
+      /CREATE OR REPLACE FUNCTION private\.user_can_delete_business_data\s*\(\s*p_organization_id\s+uuid\s*\)/i,
+    );
+    assert.match(
+      sql011,
+      /private\.user_can_delete_business_data[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path\s*=\s*''/i,
+    );
+    assert.match(sql011, /LANGUAGE sql[\s\S]*?STABLE/i);
+  });
+
+  it('helper allows only active owner/admin membership; never user_metadata', () => {
+    assert.match(sql011, /om\.role\s+IN\s*\(\s*'owner'\s*,\s*'admin'\s*\)/);
+    assert.match(sql011, /om\.status\s*=\s*'active'/);
+    assert.match(sql011, /om\.user_id\s*=\s*\(SELECT auth\.uid\(\)\)/);
+    const bodyMatch = sql011.match(
+      /CREATE OR REPLACE FUNCTION private\.user_can_delete_business_data[\s\S]*?\$\$;/,
+    );
+    assert.ok(bodyMatch, 'helper body not found');
+    assert.doesNotMatch(bodyMatch[0], /raw_user_meta_data|auth\.jwt\(\)/);
+    assert.doesNotMatch(bodyMatch[0], /\buser_metadata\b/);
+  });
+
+  it('revokes EXECUTE from PUBLIC and anon; grants EXECUTE to authenticated for RLS', () => {
+    assert.match(
+      sql011,
+      /REVOKE ALL ON FUNCTION private\.user_can_delete_business_data\(uuid\) FROM PUBLIC/i,
+    );
+    assert.match(
+      sql011,
+      /REVOKE ALL ON FUNCTION private\.user_can_delete_business_data\(uuid\) FROM anon/i,
+    );
+    assert.match(
+      sql011,
+      /GRANT EXECUTE ON FUNCTION private\.user_can_delete_business_data\(uuid\) TO authenticated/i,
+    );
+  });
+
+  it('creates RESTRICTIVE DELETE role-guard policies on all four business tables', () => {
+    for (const table of ['properties', 'clients', 'needs', 'follow_ups']) {
+      assert.match(
+        sql011,
+        new RegExp(
+          `CREATE POLICY "${table}_delete_role_guard" ON public\\.${table}\\s+AS RESTRICTIVE\\s+FOR DELETE TO authenticated`,
+          'i',
+        ),
+      );
+      assert.match(
+        sql011,
+        new RegExp(
+          `${table}_delete_role_guard[\\s\\S]*?private\\.user_can_delete_business_data\\(organization_id\\)`,
+          'i',
+        ),
+      );
+    }
+  });
+
+  it('recreates permissive tenant-scope DELETE policies and drops legacy names', () => {
+    for (const table of ['properties', 'clients', 'needs', 'follow_ups']) {
+      assert.match(
+        sql011,
+        new RegExp(
+          `DROP POLICY IF EXISTS "${table}_delete_member" ON public\\.${table}`,
+          'i',
+        ),
+      );
+      assert.match(
+        sql011,
+        new RegExp(
+          `CREATE POLICY "${table}_delete_member" ON public\\.${table}\\s+FOR DELETE TO authenticated`,
+          'i',
+        ),
+      );
+    }
+    assert.match(sql011, /DROP POLICY IF EXISTS "Tenant isolation for properties"/i);
+  });
+
+  it('does not add DELETE policy for activities (append-only preserved)', () => {
+    assert.doesNotMatch(sql011, /CREATE POLICY[\s\S]*activities[\s\S]*FOR DELETE/i);
+    assert.match(sql011, /activities remain append-only/i);
+  });
+
+  it('documents that the helper must remain in the unexposed private schema', () => {
+    assert.match(sql011, /unexposed private schema/i);
+  });
+});
