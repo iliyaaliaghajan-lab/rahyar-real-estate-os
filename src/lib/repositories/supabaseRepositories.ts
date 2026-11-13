@@ -113,6 +113,85 @@ function throwIfError(error: { message?: string } | null, context: string): void
 }
 
 /**
+ * Page size for multi-request list/search fetches.
+ * Must not assume a page shorter than this is the final page — Max Rows may be lower.
+ * Prefer exact count from the first request; advance offset by rows actually received.
+ *
+ * Multi-page reads are not a single transactional snapshot; concurrent writes may
+ * change membership of later pages relative to the initial count.
+ */
+export const SUPABASE_LIST_PAGE_SIZE = 500;
+
+type OrderBy = { column: string; ascending: boolean };
+
+/**
+ * Fetch all organization-scoped rows across pages using range() + exact count.
+ * Fails closed on page errors, missing count, stalled offset, or early empty pages.
+ */
+async function fetchAllPages<TRow>(
+  sb: SupabaseClient,
+  table: string,
+  organizationId: string,
+  orders: OrderBy[],
+  extraEq: Array<[string, string]> = [],
+): Promise<TRow[]> {
+  const results: TRow[] = [];
+  let offset = 0;
+  let total: number | null = null;
+
+  while (true) {
+    let q = sb
+      .from(table)
+      .select('*', total === null ? { count: 'exact' } : {})
+      .eq('organization_id', organizationId);
+
+    for (const [col, val] of extraEq) {
+      q = q.eq(col, val);
+    }
+    for (const o of orders) {
+      q = q.order(o.column, { ascending: o.ascending });
+    }
+    // Deterministic secondary key when primary order is not id alone
+    if (!orders.some((o) => o.column === 'id')) {
+      q = q.order('id', { ascending: true });
+    }
+
+    const to = offset + SUPABASE_LIST_PAGE_SIZE - 1;
+    q = q.range(offset, to);
+
+    const { data, error, count } = await q;
+    throwIfError(error, `${table} list page at offset ${offset}`);
+
+    if (total === null) {
+      if (typeof count !== 'number' || count < 0) {
+        throw new Error(`${table} list: exact total count unavailable`);
+      }
+      total = count;
+    }
+
+    const rows = (data ?? []) as TRow[];
+    results.push(...rows);
+
+    if (results.length >= total) {
+      break;
+    }
+    if (rows.length === 0) {
+      throw new Error(
+        `${table} list: empty page before total (have ${results.length} of ${total})`,
+      );
+    }
+
+    const prevOffset = offset;
+    offset += rows.length;
+    if (offset <= prevOffset) {
+      throw new Error(`${table} list: pagination offset stalled at ${offset}`);
+    }
+  }
+
+  return results;
+}
+
+/**
  * Best-effort timeline write after a committed business operation.
  * Never throws; does not include private customer data in warnings.
  */
@@ -159,13 +238,10 @@ export function createSupabaseRepositories(deps: SupabaseRepositoryDeps = {}): R
     async list() {
       const m = await requireMembership(getMembership);
       const sb = getSupabase();
-      const { data, error } = await sb
-        .from('properties')
-        .select('*')
-        .eq('organization_id', m.organizationId)
-        .order('updated_at', { ascending: false });
-      throwIfError(error, 'properties list');
-      return ((data ?? []) as PropertyRow[]).map(propertyFromRow);
+      const rows = await fetchAllPages<PropertyRow>(sb, 'properties', m.organizationId, [
+        { column: 'updated_at', ascending: false },
+      ]);
+      return rows.map(propertyFromRow);
     },
     async get(id) {
       if (!isUuid(id)) return undefined;
@@ -248,13 +324,10 @@ export function createSupabaseRepositories(deps: SupabaseRepositoryDeps = {}): R
     async list() {
       const m = await requireMembership(getMembership);
       const sb = getSupabase();
-      const { data, error } = await sb
-        .from('clients')
-        .select('*')
-        .eq('organization_id', m.organizationId)
-        .order('updated_at', { ascending: false });
-      throwIfError(error, 'clients list');
-      return ((data ?? []) as ClientRow[]).map(clientFromRow);
+      const rows = await fetchAllPages<ClientRow>(sb, 'clients', m.organizationId, [
+        { column: 'updated_at', ascending: false },
+      ]);
+      return rows.map(clientFromRow);
     },
     async get(id) {
       if (!isUuid(id)) return undefined;
@@ -318,28 +391,27 @@ export function createSupabaseRepositories(deps: SupabaseRepositoryDeps = {}): R
   };
 
   const needs: NeedRepository = {
+    // Deterministic order: created_at ASC, id ASC (documented for pagination stability)
     async list() {
       const m = await requireMembership(getMembership);
       const sb = getSupabase();
-      const { data, error } = await sb
-        .from('needs')
-        .select('*')
-        .eq('organization_id', m.organizationId);
-      throwIfError(error, 'needs list');
-      return ((data ?? []) as NeedRow[]).map(needFromRow);
+      const rows = await fetchAllPages<NeedRow>(sb, 'needs', m.organizationId, [
+        { column: 'created_at', ascending: true },
+      ]);
+      return rows.map(needFromRow);
     },
     async listByClient(clientId) {
       requireUuid(clientId, 'clientId');
       const m = await requireMembership(getMembership);
       const sb = getSupabase();
-      const { data, error } = await sb
-        .from('needs')
-        .select('*')
-        .eq('organization_id', m.organizationId)
-        .eq('client_id', clientId)
-        .order('created_at', { ascending: true });
-      throwIfError(error, 'needs listByClient');
-      return ((data ?? []) as NeedRow[]).map(needFromRow);
+      const rows = await fetchAllPages<NeedRow>(
+        sb,
+        'needs',
+        m.organizationId,
+        [{ column: 'created_at', ascending: true }],
+        [['client_id', clientId]],
+      );
+      return rows.map(needFromRow);
     },
     async get(id) {
       if (!isUuid(id)) return undefined;
@@ -404,26 +476,23 @@ export function createSupabaseRepositories(deps: SupabaseRepositoryDeps = {}): R
     async list() {
       const m = await requireMembership(getMembership);
       const sb = getSupabase();
-      const { data, error } = await sb
-        .from('follow_ups')
-        .select('*')
-        .eq('organization_id', m.organizationId)
-        .order('due_date', { ascending: true });
-      throwIfError(error, 'follow_ups list');
-      return ((data ?? []) as FollowUpRow[]).map(followUpFromRow);
+      const rows = await fetchAllPages<FollowUpRow>(sb, 'follow_ups', m.organizationId, [
+        { column: 'due_date', ascending: true },
+      ]);
+      return rows.map(followUpFromRow);
     },
     async listByClient(clientId) {
       requireUuid(clientId, 'clientId');
       const m = await requireMembership(getMembership);
       const sb = getSupabase();
-      const { data, error } = await sb
-        .from('follow_ups')
-        .select('*')
-        .eq('organization_id', m.organizationId)
-        .eq('client_id', clientId)
-        .order('due_date', { ascending: true });
-      throwIfError(error, 'follow_ups listByClient');
-      return ((data ?? []) as FollowUpRow[]).map(followUpFromRow);
+      const rows = await fetchAllPages<FollowUpRow>(
+        sb,
+        'follow_ups',
+        m.organizationId,
+        [{ column: 'due_date', ascending: true }],
+        [['client_id', clientId]],
+      );
+      return rows.map(followUpFromRow);
     },
     async get(id) {
       if (!isUuid(id)) return undefined;
