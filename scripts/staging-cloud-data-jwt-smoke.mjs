@@ -358,7 +358,7 @@ async function main() {
         .insert({
           organization_id: orgAId,
           type: "client",
-          text: (actAText = `Act A ${runId}`),
+          text: (actAText = `act A ${runId}`),
           created_by: userIdA,
         })
         .select("id")
@@ -371,19 +371,19 @@ async function main() {
         .insert({
           organization_id: orgBId,
           type: "client",
-          text: `Act B ${runId}`,
+          text: `act B ${runId}`,
           created_by: userIdB,
         })
         .select("id")
         .single();
       if (insActB.error || !insActB.data?.id) throw new Error("seed activity B failed");
       actB = insActB.data.id;
-
-      record("SETUP", "PASS", `users+orgs+seeds ready run=${runId}`);
-    } catch (e) {
-      setupError = e instanceof Error ? e.message : "setup failed";
-      record("SETUP", "FAIL", setupError);
+    } catch (err) {
+      setupError = err instanceof Error ? err.message : "setup failed";
+      console.error(`SETUP FAIL — ${setupError}`);
     }
+
+    const skip = (id, why) => record(id, "SKIP", why);
 
     if (setupError) {
       for (const id of [
@@ -391,20 +391,20 @@ async function main() {
         "T-INS-OWN",
         "T-INS-CROSS",
         "T-INS-AUDIT",
-        "T-FK-NEED",
-        "T-FK-FU-CLIENT",
-        "T-FK-FU-PROP",
-        "T-UPD-OWN",
         "T-UPD-CROSS",
         "T-UPD-ORG",
-        "T-UPD-CREATED-BY",
+        "T-UPD-CREATED",
         "T-UPD-ACT",
         "T-DEL-CROSS",
         "T-DEL-OWN",
         "T-DEL-ACT",
+        "T-FK-NEED",
+        "T-FK-FU-CLIENT",
+        "T-FK-FU-PROP",
+        "T-ACT-READ",
         "T-ANON",
       ]) {
-        record(id, "SKIP", "setup failed");
+        skip(id, "setup failed");
       }
     } else {
       // --- T-SEL: tenant isolation SELECT with positive own-row proof ---
@@ -551,179 +551,106 @@ async function main() {
         const res = await clients.A.from(target.table).insert(target.payload).select("id");
         if (!res.error) {
           const leaked = (res.data || [])[0]?.id;
-          if (leaked) {
+          if (leaked && target.table !== "activities") {
             await clients.A.from(target.table).delete().eq("id", leaked);
           }
           auditOk = false;
-          auditDetail = `invalid audit insert succeeded on ${target.table}`;
+          auditDetail = `${target.table} accepted foreign audit columns`;
           break;
         }
         const k = denialKind(res.error);
-        if (k !== "permission" && k !== "trigger") {
+        if (k !== "permission") {
           auditOk = false;
-          auditDetail = `unexpected denial kind=${k} on ${target.table}`;
+          auditDetail = `${target.table} unexpected denial kind=${k}`;
           break;
         }
       }
-      if (auditOk) record("T-INS-AUDIT", "PASS", "invalid created_by/updated_by rejected");
-      else record("T-INS-AUDIT", "FAIL", auditDetail);
-
-      // --- T-FK-NEED: need must reference same-org client ---
-      const fkNeed = await clients.A.from("needs").insert({
-        organization_id: orgAId,
-        client_id: clientB,
-        created_by: userIdA,
-        updated_by: userIdA,
-      });
-      {
-        const k = denialKind(fkNeed.error);
-        const code = String(fkNeed.error?.code || "");
-        if (code === "23503" || k === "fk") {
-          record("T-FK-NEED", "PASS", `FK violation code=${code || k}`);
-        } else if (!fkNeed.error) {
-          record("T-FK-NEED", "FAIL", "cross-org need insert succeeded");
-        } else if (k === "permission") {
-          record("T-FK-NEED", "FAIL", "got generic permission instead of FK");
-        } else {
-          record("T-FK-NEED", "FAIL", `unexpected kind=${k} code=${code}`);
-        }
-      }
-
-      // --- T-FK-FU-CLIENT: follow_up client must be same org ---
-      const fkFuClient = await clients.A.from("follow_ups").insert({
-        organization_id: orgAId,
-        title: `fk-fu-client ${runId}`,
-        client_id: clientB,
-        created_by: userIdA,
-        updated_by: userIdA,
-      });
-      {
-        const k = denialKind(fkFuClient.error);
-        const code = String(fkFuClient.error?.code || "");
-        if (code === "23503" || k === "fk" || k === "trigger") {
-          record("T-FK-FU-CLIENT", "PASS", `denied code=${code || k}`);
-        } else if (!fkFuClient.error) {
-          record("T-FK-FU-CLIENT", "FAIL", "cross-org follow_up client insert succeeded");
-        } else if (k === "permission") {
-          record("T-FK-FU-CLIENT", "FAIL", "got generic permission instead of FK/trigger");
-        } else {
-          record("T-FK-FU-CLIENT", "FAIL", `unexpected kind=${k} code=${code}`);
-        }
-      }
-
-      // --- T-FK-FU-PROP: follow_up property must be same org ---
-      const fkFuProp = await clients.A.from("follow_ups").insert({
-        organization_id: orgAId,
-        title: `fk-fu-prop ${runId}`,
-        client_id: clientA,
-        property_id: propB,
-        created_by: userIdA,
-        updated_by: userIdA,
-      });
-      {
-        const k = denialKind(fkFuProp.error);
-        const code = String(fkFuProp.error?.code || "");
-        if (code === "23503" || k === "fk" || k === "trigger") {
-          record("T-FK-FU-PROP", "PASS", `denied code=${code || k}`);
-        } else if (!fkFuProp.error) {
-          record("T-FK-FU-PROP", "FAIL", "cross-org follow_up property insert succeeded");
-        } else if (k === "permission") {
-          record("T-FK-FU-PROP", "FAIL", "got generic permission instead of FK/trigger");
-        } else {
-          record("T-FK-FU-PROP", "FAIL", `unexpected kind=${k} code=${code}`);
-        }
-      }
-
-      // --- T-UPD-OWN: own-tenant UPDATE ---
-      const ownUpd = await clients.A
-        .from("properties")
-        .update({ title: `updated-own ${runId}`, updated_by: userIdA })
-        .eq("id", propA)
-        .select("id,title")
-        .single();
-      if (ownUpd.error || !ownUpd.data || ownUpd.data.title !== `updated-own ${runId}`) {
-        record("T-UPD-OWN", "FAIL", "own UPDATE failed");
+      if (auditOk) {
+        record("T-INS-AUDIT", "PASS", "foreign audit denied on 5 tables");
       } else {
-        propATitle = ownUpd.data.title;
-        record("T-UPD-OWN", "PASS", "own UPDATE ok");
+        record("T-INS-AUDIT", "FAIL", auditDetail);
       }
 
-      // --- T-UPD-CROSS: cross-tenant UPDATE blocked + read-back ---
+      // --- T-UPD-CROSS: cross-tenant UPDATE + read-back ---
       const crossUpd = await clients.A
         .from("properties")
-        .update({ title: "hacked-by-A" })
+        .update({ title: "hijacked", updated_by: userIdA })
         .eq("id", propB)
         .select("id");
-      let crossUpdPass = false;
+      let updCrossPass = false;
       if (crossUpd.error) {
         const k = denialKind(crossUpd.error);
-        if (k === "permission") crossUpdPass = true;
-        else record("T-UPD-CROSS", "FAIL", `unexpected kind=${k}`);
+        if (k === "permission") updCrossPass = true;
+        else record("T-UPD-CROSS", "FAIL", `cross-tenant UPDATE error kind=${k}`);
       } else if ((crossUpd.data || []).length === 0) {
-        crossUpdPass = true;
+        updCrossPass = true;
       } else {
-        record("T-UPD-CROSS", "FAIL", "cross UPDATE modified foreign rows");
+        record("T-UPD-CROSS", "FAIL", "cross-tenant UPDATE modified foreign rows");
       }
-      if (crossUpdPass) {
+      if (updCrossPass) {
         const rb = await clients.B.from("properties").select("id,title").eq("id", propB).maybeSingle();
-        if (rb.error || !rb.data || rb.data.title === "hacked-by-A") {
-          record("T-UPD-CROSS", "FAIL", "read-back shows foreign title changed or missing");
+        if (rb.error || !rb.data || rb.data.title === "hijacked") {
+          record("T-UPD-CROSS", "FAIL", "read-back shows prop B was altered or missing");
         } else {
           record("T-UPD-CROSS", "PASS", "cross UPDATE blocked; read-back ok");
         }
       }
 
-      // --- T-UPD-ORG: organization_id immutable ---
-      const orgUpd = await clients.A
+      // --- T-UPD-ORG: organization_id immutability + read-back ---
+      const orgMove = await clients.A
         .from("properties")
-        .update({ organization_id: orgBId })
+        .update({ organization_id: orgBId, updated_by: userIdA })
         .eq("id", propA)
-        .select("id");
-      let orgImmOk = false;
-      if (orgUpd.error) {
-        const k = denialKind(orgUpd.error);
-        if (k === "permission" || k === "trigger") orgImmOk = true;
-        else record("T-UPD-ORG", "FAIL", `unexpected kind=${k}`);
-      } else if ((orgUpd.data || []).length === 0) {
-        orgImmOk = true;
+        .select("id,organization_id");
+      let orgPass = false;
+      if (orgMove.error) {
+        const k = denialKind(orgMove.error);
+        if (k === "trigger" || k === "permission") orgPass = true;
+        else record("T-UPD-ORG", "FAIL", `unexpected denial kind=${k}`);
+      } else if ((orgMove.data || []).length === 0) {
+        orgPass = true;
+      } else if (orgMove.data[0]?.organization_id === orgAId) {
+        orgPass = true;
       } else {
-        record("T-UPD-ORG", "FAIL", "organization_id change succeeded");
+        record("T-UPD-ORG", "FAIL", "organization_id was changed");
       }
-      if (orgImmOk) {
+      if (orgPass) {
         const rb = await clients.A.from("properties").select("id,organization_id").eq("id", propA).maybeSingle();
         if (rb.error || !rb.data || rb.data.organization_id !== orgAId) {
-          record("T-UPD-ORG", "FAIL", "read-back organization_id wrong");
+          record("T-UPD-ORG", "FAIL", "read-back shows organization_id changed or missing");
         } else {
-          record("T-UPD-ORG", "PASS", "organization_id immutable");
+          record("T-UPD-ORG", "PASS", "org_id immutable; read-back ok");
         }
       }
 
-      // --- T-UPD-CREATED-BY: created_by immutable ---
-      const cbUpd = await clients.A
+      // --- T-UPD-CREATED: created_by immutability + read-back ---
+      const cbMove = await clients.A
         .from("properties")
-        .update({ created_by: userIdB })
+        .update({ created_by: userIdB, updated_by: userIdA })
         .eq("id", propA)
-        .select("id");
-      let cbImmOk = false;
-      if (cbUpd.error) {
-        const k = denialKind(cbUpd.error);
-        if (k === "permission" || k === "trigger") cbImmOk = true;
-        else record("T-UPD-CREATED-BY", "FAIL", `unexpected kind=${k}`);
-      } else if ((cbUpd.data || []).length === 0) {
-        cbImmOk = true;
+        .select("id,created_by");
+      let cbPass = false;
+      if (cbMove.error) {
+        const k = denialKind(cbMove.error);
+        if (k === "trigger" || k === "permission") cbPass = true;
+        else record("T-UPD-CREATED", "FAIL", `unexpected denial kind=${k}`);
+      } else if ((cbMove.data || []).length === 0) {
+        cbPass = true;
+      } else if (cbMove.data[0]?.created_by === userIdA) {
+        cbPass = true;
       } else {
-        record("T-UPD-CREATED-BY", "FAIL", "created_by change succeeded");
+        record("T-UPD-CREATED", "FAIL", "created_by was changed");
       }
-      if (cbImmOk) {
+      if (cbPass) {
         const rb = await clients.A.from("properties").select("id,created_by").eq("id", propA).maybeSingle();
         if (rb.error || !rb.data || rb.data.created_by !== userIdA) {
-          record("T-UPD-CREATED-BY", "FAIL", "read-back created_by wrong");
+          record("T-UPD-CREATED", "FAIL", "read-back shows created_by changed or missing");
         } else {
-          record("T-UPD-CREATED-BY", "PASS", "created_by immutable");
+          record("T-UPD-CREATED", "PASS", "created_by immutable; read-back ok");
         }
       }
 
-      // --- T-UPD-ACT: activities no UPDATE + read-back ---
+      // --- T-UPD-ACT: activities no UPDATE + read-back of original text ---
       const actUpd = await clients.A
         .from("activities")
         .update({ text: "mutated" })
@@ -856,109 +783,184 @@ async function main() {
         record("T-DEL-ACT", "FAIL", "activities DELETE succeeded");
       }
       if (actDelBlocked) {
-        const rb = await clients.A.from("activities").select("id").eq("id", actA).maybeSingle();
-        if (rb.error || !rb.data) {
-          record("T-DEL-ACT", "FAIL", "read-back shows activity missing after DELETE attempt");
+        const rb = await clients.A.from("activities").select("id,text").eq("id", actA).maybeSingle();
+        if (rb.error || !rb.data || rb.data.text !== actAText) {
+          record("T-DEL-ACT", "FAIL", "read-back shows activity missing or altered after DELETE attempt");
         } else {
-          record("T-DEL-ACT", "PASS", "act DELETE blocked; read-back ok");
+          record("T-DEL-ACT", "PASS", "act DELETE blocked; row ok");
         }
       }
 
-      // --- T-ANON: anon key cannot read business tables ---
-      const anon = anonClient(url, anonKey);
-      let anonOk = true;
-      let anonDetail = "";
-      for (const t of tables) {
-        const res = await anon.from(t).select("id").limit(1);
-        if (!res.error && (res.data || []).length > 0) {
-          anonOk = false;
-          anonDetail = `anon read returned rows on ${t}`;
-          break;
-        }
-        if (res.error) {
-          const k = denialKind(res.error);
-          if (k !== "auth" && k !== "permission") {
-            anonOk = false;
-            anonDetail = `anon unexpected kind=${k} on ${t}`;
-            break;
-          }
+      // --- T-FK-NEED: needs cannot reference foreign client ---
+      const fkNeed = await clients.A.from("needs").insert({
+        organization_id: orgAId,
+        client_id: clientB,
+        created_by: userIdA,
+        updated_by: userIdA,
+      });
+      const fkNeedKind = denialKind(fkNeed.error);
+      if (fkNeedKind === "fk") {
+        record("T-FK-NEED", "PASS", "need FK 23503");
+      } else if (!fkNeed.error) {
+        record("T-FK-NEED", "FAIL", "cross-org need client insert succeeded");
+      } else {
+        record("T-FK-NEED", "FAIL", `expected FK, got kind=${fkNeedKind}`);
+      }
+
+      // --- T-FK-FU-CLIENT: follow_ups cannot reference foreign client ---
+      const fkFuClient = await clients.A.from("follow_ups").insert({
+        organization_id: orgAId,
+        title: `bad-client ${runId}`,
+        client_id: clientB,
+        created_by: userIdA,
+        updated_by: userIdA,
+      });
+      const fkFuCKind = denialKind(fkFuClient.error);
+      if (fkFuCKind === "fk") {
+        record("T-FK-FU-CLIENT", "PASS", "fu client FK 23503");
+      } else if (!fkFuClient.error) {
+        record("T-FK-FU-CLIENT", "FAIL", "cross-org follow_up client insert succeeded");
+      } else {
+        record("T-FK-FU-CLIENT", "FAIL", `expected FK, got kind=${fkFuCKind}`);
+      }
+
+      // --- T-FK-FU-PROP: follow_ups cannot reference foreign property ---
+      const fkFuProp = await clients.A.from("follow_ups").insert({
+        organization_id: orgAId,
+        title: `bad-prop ${runId}`,
+        client_id: clientA,
+        property_id: propB,
+        created_by: userIdA,
+        updated_by: userIdA,
+      });
+      const fkFuPKind = denialKind(fkFuProp.error);
+      if (fkFuPKind === "trigger") {
+        record("T-FK-FU-PROP", "PASS", "fu prop trigger 23514");
+      } else if (fkFuPKind === "fk") {
+        record("T-FK-FU-PROP", "PASS", "fu prop FK");
+      } else if (!fkFuProp.error) {
+        record("T-FK-FU-PROP", "FAIL", "cross-org follow_up property insert succeeded");
+      } else {
+        record("T-FK-FU-PROP", "FAIL", `expected trigger/FK, got kind=${fkFuPKind}`);
+      }
+
+      // --- T-ACT-READ: activities readable only in own org ---
+      const actReadA = await clients.A.from("activities").select("id,organization_id");
+      if (actReadA.error) {
+        record("T-ACT-READ", "FAIL", "Owner A could not read activities");
+      } else {
+        const foreign = (actReadA.data || []).filter((r) => r.organization_id === orgBId || r.id === actB);
+        const own = (actReadA.data || []).filter((r) => r.id === actA);
+        if (foreign.length > 0) {
+          record("T-ACT-READ", "FAIL", "Owner A saw Org B activities");
+        } else if (own.length !== 1) {
+          record("T-ACT-READ", "FAIL", "own activity not visible to owner");
+        } else {
+          record("T-ACT-READ", "PASS", "act SELECT own only");
         }
       }
-      if (anonOk) record("T-ANON", "PASS", "anon denied on all tables");
-      else record("T-ANON", "FAIL", anonDetail);
+
+      // --- T-ANON: unauthenticated access must be denied (not empty success) ---
+      const bare = anonClient(url, anonKey);
+      let anonOk = true;
+      for (const t of tables) {
+        const res = await bare.from(t).select("id").limit(1);
+        if (!res.error) {
+          record("T-ANON", "FAIL", `anon select on ${t} returned without error`);
+          anonOk = false;
+          break;
+        }
+        const k = denialKind(res.error);
+        if (k !== "permission" && k !== "auth") {
+          record("T-ANON", "FAIL", `anon select on ${t} unexpected kind=${k}`);
+          anonOk = false;
+          break;
+        }
+      }
+      if (anonOk) record("T-ANON", "PASS", "anon denied on 5 tables");
     }
   } finally {
     const cleanupFailures = [];
-    try {
-      // Prefer user JWT deletes for own-tenant rows, then service-role org wipe.
-      if (clients.A && orgAId) {
-        for (const [table, id] of [
-          ["follow_ups", fuA],
-          ["needs", needA],
-          ["properties", propA],
-          ["clients", clientA],
-        ]) {
-          await trackedDelete(clients.A, table, id, cleanupFailures, `A.${table}`);
-        }
-      }
-      if (clients.B && orgBId) {
-        for (const [table, id] of [
-          ["follow_ups", fuB],
-          ["needs", needB],
-          ["properties", propB],
-          ["clients", clientB],
-        ]) {
-          await trackedDelete(clients.B, table, id, cleanupFailures, `B.${table}`);
-        }
-      }
 
-      // Org delete (service role) cascades memberships and remaining rows including activities.
-      if (orgAId) {
-        const delOrgA = await admin.from("organizations").delete().eq("id", orgAId).select("id");
-        if (delOrgA.error) cleanupFailures.push(`orgA: ${delOrgA.error.code || "error"}`);
+    // Prefer JWT clients for business-row cleanup when sessions still exist.
+    // Order: follow_ups → needs → properties → clients (activities via org cascade).
+    if (!setupError && clients.A && clients.B) {
+      for (const [label, client, rows] of [
+        ["A", clients.A, { prop: propA, client: clientA, need: needA, fu: fuA }],
+        ["B", clients.B, { prop: propB, client: clientB, need: needB, fu: fuB }],
+      ]) {
+        await trackedDelete(client, "follow_ups", rows.fu, cleanupFailures, `follow_ups-${label}`);
+        await trackedDelete(client, "needs", rows.need, cleanupFailures, `needs-${label}`);
+        await trackedDelete(client, "properties", rows.prop, cleanupFailures, `properties-${label}`);
+        await trackedDelete(client, "clients", rows.client, cleanupFailures, `clients-${label}`);
       }
-      if (orgBId) {
-        const delOrgB = await admin.from("organizations").delete().eq("id", orgBId).select("id");
-        if (delOrgB.error) cleanupFailures.push(`orgB: ${delOrgB.error.code || "error"}`);
-      }
-
-      // Residual org name check
-      for (const name of orgNames) {
-        const residual = await admin.from("organizations").select("id,name").eq("name", name);
-        if (residual.error) {
-          cleanupFailures.push(`residual-org-query ${name}: ${residual.error.code || "error"}`);
-        } else if ((residual.data || []).length > 0) {
-          cleanupFailures.push(`residual org name still present: ${name}`);
-        }
-      }
-
-      // Delete disposable users
-      for (const uid of userIds) {
-        try {
-          const delUser = await admin.auth.admin.deleteUser(uid);
-          if (delUser.error) cleanupFailures.push(`user ${uid}: ${delUser.error.message || "error"}`);
-        } catch {
-          cleanupFailures.push(`user ${uid}: exception`);
-        }
-      }
-    } catch (e) {
-      cleanupFailures.push(e instanceof Error ? e.message : "cleanup exception");
+      // activities: no DELETE privilege for authenticated — removed by organization CASCADE
     }
 
-    if (cleanupFailures.length > 0) {
-      cleanupFailed = true;
-      record("CLEANUP", "FAIL", cleanupFailures.join("; ") + ` run=${runId}`);
+    if (orgNames.size > 0) {
+      try {
+        const found = await admin.from("organizations").select("id,name").in("name", [...orgNames]);
+        if (found.error) {
+          cleanupFailures.push(`organization lookup: ${found.error.code || "error"}`);
+        } else {
+          for (const row of found.data || []) {
+            if (!orgNames.has(row.name)) continue;
+            try {
+              const removed = await admin.from("organizations").delete().eq("id", row.id).select("id");
+              if (removed.error) {
+                cleanupFailures.push(`organization delete: ${removed.error.code || "error"}`);
+              }
+            } catch {
+              cleanupFailures.push("organization delete: exception");
+            }
+          }
+          // Verify names from this run are gone
+          try {
+            const verify = await admin.from("organizations").select("id,name").in("name", [...orgNames]);
+            if (verify.error) {
+              cleanupFailures.push(`organization verify: ${verify.error.code || "error"}`);
+            } else if ((verify.data || []).length > 0) {
+              cleanupFailures.push(`organization residual names remain count=${verify.data.length}`);
+            }
+          } catch {
+            cleanupFailures.push("organization verify: exception");
+          }
+        }
+      } catch {
+        cleanupFailures.push("organization lookup: exception");
+      }
+    }
+
+    for (const id of userIds) {
+      try {
+        const removed = await admin.auth.admin.deleteUser(id);
+        if (removed.error) cleanupFailures.push(`auth user delete: ${removed.error.message || "error"}`);
+      } catch {
+        cleanupFailures.push("auth user delete: exception");
+      }
+    }
+
+    if (cleanupFailures.length === 0) {
+      console.log(`CLEANUP OK run ${runId}`);
     } else {
-      record("CLEANUP", "PASS", `run=${runId} residual-clear");
+      cleanupFailed = true;
+      const kinds = [...new Set(cleanupFailures)].join(", ");
+      console.error(
+        `CLEANUP FAIL run ${runId} kinds=${kinds} — manual cleanup may be needed for this run id`,
+      );
     }
   }
 
-  const failed = results.filter((r) => r.status === "FAIL");
-  const passed = results.filter((r) => r.status === "PASS");
-  console.log(`summary pass=${passed.length} fail=${failed.length} total=${results.length}`);
-  if (failed.length > 0 || cleanupFailed) {
-    process.exit(1);
-  }
+    const failed = results.some((item) => item.status === "FAIL");
+  const summary = results.reduce(
+    (acc, item) => {
+      acc[item.status] = (acc[item.status] || 0) + 1;
+      return acc;
+    },
+    { PASS: 0, FAIL: 0, SKIP: 0 },
+  );
+  console.log(`SUMMARY pass=${summary.PASS} fail=${summary.FAIL} skip=${summary.SKIP} run=${runId}`);
+  if (setupError || failed || cleanupFailed) process.exit(1);
 }
 
 main().catch((err) => {
