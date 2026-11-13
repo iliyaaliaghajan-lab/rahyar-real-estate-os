@@ -81,31 +81,55 @@ jobs:
             exit 1
           fi
           echo "P0_ALLOWED_SERVER_ADDR=$IP" >> "$GITHUB_ENV"
-          echo "Resolved postgres service IP: $IP"
+          echo "P0_ALLOW_SERVICE_CONTAINER=1" >> "$GITHUB_ENV"
+          echo "Inspected postgres service container IP: $IP"
 
-      - name: Invitation P0
+      - name: Invitation P0 (A/B/C)
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
           PGUSER: postgres
           PGPASSWORD: postgres
-          P0_ALLOW_SERVICE_CONTAINER: "1"
-        run: bash scripts/isolated-pg/run_invitation_p0.sh
+          CONCURRENCY_ROUNDS: "5"
+          MIGRATIONS_DIR: supabase/migrations
+          STUBS_DIR: scripts/isolated-pg
+        run: |
+          chmod +x scripts/isolated-pg/run_invitation_p0.sh
+          scripts/isolated-pg/run_invitation_p0.sh
 
-      - name: Tenant isolation P0
+      - name: Tenant isolation P0 (T1–T6)
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
           PGUSER: postgres
           PGPASSWORD: postgres
-          P0_ALLOW_SERVICE_CONTAINER: "1"
-        run: bash scripts/isolated-pg/run_tenant_isolation_p0.sh
+          MIGRATIONS_DIR: supabase/migrations
+          STUBS_DIR: scripts/isolated-pg
+        run: |
+          chmod +x scripts/isolated-pg/run_tenant_isolation_p0.sh
+          scripts/isolated-pg/run_tenant_isolation_p0.sh
 
-      - name: Cloud data P0
+      - name: Cloud data foundation P0 (C1–C9)
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
           PGUSER: postgres
           PGPASSWORD: postgres
-          P0_ALLOW_SERVICE_CONTAINER: "1"
-        run: bash scripts/isolated-pg/run_cloud_data_p0.sh
+          MIGRATIONS_DIR: supabase/migrations
+          STUBS_DIR: scripts/isolated-pg
+        run: |
+          chmod +x scripts/isolated-pg/run_cloud_data_p0.sh
+          scripts/isolated-pg/run_cloud_data_p0.sh
+
+  unit-contracts:
+    name: Unit / static contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
