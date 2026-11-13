@@ -1,53 +1,12 @@
 # Staging RLS test plan
 
-**Status:** Plan + status board. Local `npm test` is **not** by itself evidence of live RLS.
+This document tracks which multi-tenant and invitation RLS scenarios have been
+executed against Staging, and which remain unproven.
 
-An opt-in runner exists at `scripts/staging-security-smoke.mjs` (`npm run test:staging-security`). It is **not** part of ordinary CI jobs. Manual GitHub Actions path: workflow `staging-security-smoke.yml` (`workflow_dispatch` only, Node.js 22, Environment `etehad-staging-security`, branch pin + `confirm_staging_run=true`). Requires `STAGING_SUPABASE_URL`, `STAGING_SUPABASE_ANON_KEY`, `STAGING_SUPABASE_SERVICE_ROLE_KEY`, and `STAGING_SECURITY_TEST_CONFIRM=dezonafotwyvvghbccko`, and refuses every origin except `https://dezonafotwyvvghbccko.supabase.co`. See `docs/STAGING_AUTOMATED_SECURITY_TESTS.md`.
-
-## Environment
-
-| Item | Value |
-|------|--------|
-| Staging project name | `etehad-staging` |
-| Staging project ID | `dezonafotwyvvghbccko` |
-| Production project | `rahyar` (`gguvmewknanhzukugvpj`) — **do not use for these tests** |
-| Migrations 001–007 on staging | **Recorded in Staging migration history** |
-| Migration 006 / 007 order | **006 applied after 007**; history was **not** rewritten |
-| Auth users / orgs for automated path | Runner creates disposable users via Auth Admin APIs |
-
-## Execution log (evidence-based)
-
-| Category | Result |
-|----------|--------|
-| Schema / grants (catalog, operator-reported) | After 007: invitation table SELECT revoked for authenticated/anon/PUBLIC; RLS on; no policies; create RPC EXECUTE for authenticated only. After 006 (applied later): invitation FK indexes and active-membership guard on `create_organization_with_owner` reported present. |
-| Automated Staging security smoke (L1/L2/L3/L4/L5a/L5b/L6/S5/S6) | **Passed** — Actions run [40428548889](https://github.com/iliyaaliaghajan-lab/rahyar-real-estate-os/actions/runs/40428548889) on HEAD `e4bb442baffdde8db47bbdded8d5855aab1838f6`; runner id `89594cd043ef`; `pass=12` `fail=0` `skip=0`; **CLEANUP OK**. Follow-up operator query reported zero leftover disposable orgs/users/invites for that run id. |
-| Full S1–S10 matrix beyond smoke coverage | Partial: smoke covers create-two-orgs, isolation read (L6), denied direct insert/update (S5/S6). Other S-rows without smoke mapping remain **not run** as a separate suite. |
-| Invitation I-rows mapped to smoke | See mapping below. Unmapped rows stay **Not run**. |
-| Concurrent accept / dual org race | **Not run** |
-| Browser login → callback → accept | **Not run** |
-| Invitation expiry (I7) | **Not run** |
-
-## Smoke ↔ plan mapping (verified on run 40428548889)
-
-| Smoke ID | Related plan IDs | Result |
-|----------|------------------|--------|
-| L1-owner, L1-agent | I11 | PASS |
-| L2-C, L2-B | I1 | PASS |
-| L3 | I2 | PASS |
-| L4-C, L4-B | I4 | PASS |
-| L5a | I6 | PASS |
-| L5b | I5 | PASS |
-| L6 | S3 / S4 (org + members visibility for disposable orgs) | PASS |
-| S5 | S5 | PASS |
-| S6 | S6 | PASS |
-
-## Prerequisites
-
-1. Isolated project `etehad-staging` only.  
-2. Migrations **001–007** present in Staging history (note: Staging applied **006 after 007**). On a **new** environment prefer file order: 005 → 006 → 007.  
-3. `extensions.digest` / pgcrypto available.  
-4. **Automated path:** export the four Staging-only env vars and run `npm run test:staging-security`, or dispatch the opt-in workflow with confirmation.  
-5. **Manual path (optional):** disposable Auth users via the Authentication Dashboard; staging anon key only in the browser.
+Smoke success proves only the scenarios the runner asserts.
+Catalog privilege checks and Security Advisor findings still need human review;
+intentional no-policy on invitations is by design after 007.
+Do not treat Production as tested.
 
 ## Core tenant scenarios
 
@@ -88,3 +47,29 @@ An opt-in runner exists at `scripts/staging-security-smoke.mjs` (`npm run test:s
 - Smoke success proves only the scenarios the runner asserts.
 - Catalog privilege checks and Security Advisor findings still need human review; intentional no-policy on invitations is by design after 007.
 - Do not treat Production as tested.
+
+## Business DELETE role matrix (Migration 011)
+
+Product policy (Option 1):
+
+| Role | SELECT / INSERT / UPDATE business tables | DELETE business tables | DELETE organization |
+|------|------------------------------------------|------------------------|---------------------|
+| owner | yes (own active org) | yes (own active org) | yes |
+| admin | yes (own active org) | yes (own active org) | no |
+| agent | yes (own active org) | **no** | no |
+
+Enforcement:
+
+- Database RLS is authoritative (`private.user_can_delete_business_data` + RESTRICTIVE DELETE policies on `properties`, `clients`, `needs`, `follow_ups`).
+- `activities` remain append-only for every authenticated role (no DELETE/UPDATE policy; grants stay SELECT+INSERT).
+- Application still defaults to the Dexie repository; UI delete-button gating is deferred to the cloud-adapter activation phase.
+
+### Isolated / local proof status
+
+| Environment | Status |
+|-------------|--------|
+| Isolated Postgres P0 (PG15/16/17) | Intended proof surface for Migration 011 role matrix |
+| Staging | **NOT run** — no hosted migration apply; no Staging role-DELETE verification |
+| Production | **NOT run** |
+
+Do not interpret isolated green results as Staging or Production authorization proof.
