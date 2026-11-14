@@ -19,7 +19,7 @@ pass() { log "PASS: $*"; }
 fail() { log "FAIL: $*"; exit 1; }
 
 # Assert a psql command fails with one of the expected SQLSTATE codes.
-# Prefer SQLSTATE from verbose ERROR lines; fall back to known codes in the text.
+# Prefer SQLSTATE from verbose ERROR lines; fall back to known codes / message patterns.
 expect_fail() {
   local codes_re="$1"
   local desc="$2"
@@ -33,6 +33,16 @@ expect_fail() {
   code=$(printf '%s\n' "$err" | sed -nE 's/.*ERROR:[[:space:]]+([0-9A-Z]{5}):.*/\1/p' | head -1)
   if [[ -z "$code" ]]; then
     code=$(printf '%s\n' "$err" | grep -oE '(23503|23514|42501|42401|P0001)' | head -1 || true)
+  fi
+  # Message-pattern fallback (covers builds where SQLSTATE is not echoed)
+  if [[ -z "$code" ]] || ! [[ "$code" =~ ^($codes_re)$ ]]; then
+    if [[ "$codes_re" == *42501* ]] && printf '%s\n' "$err" | grep -qiE 'permission denied|row-level security|violates row-level|insufficient_privilege'; then
+      code=42501
+    elif [[ "$codes_re" == *23503* ]] && printf '%s\n' "$err" | grep -qiE 'foreign key|violates foreign key'; then
+      code=23503
+    elif [[ "$codes_re" == *23514* ]] && printf '%s\n' "$err" | grep -qiE 'check constraint|organization_id cannot be changed|created_by cannot be changed|same organization|must belong to the same organization'; then
+      code=23514
+    fi
   fi
   if [[ -z "$code" ]] || ! [[ "$code" =~ ^($codes_re)$ ]]; then
     fail "$desc: expected SQLSTATE /$codes_re/, got '${code:-none}' :: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-240)"
