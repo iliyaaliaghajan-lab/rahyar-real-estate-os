@@ -61,7 +61,6 @@ describe("staging role-based DELETE JWT smoke runner contract", () => {
     assert.match(runner, /auth\.admin\.deleteUser/);
     assert.match(runner, /from\("organizations"\)\.delete\(\)/);
     assert.match(runner, /from\("organization_members"\)\.insert/);
-    // Service role must not be used for business-table DELETE authorization assertions
     assert.doesNotMatch(
       executable,
       /from\("(properties|clients|needs|follow_ups|activities)"\)\.delete[\s\S]{0,80}admin\b/,
@@ -100,7 +99,6 @@ describe("staging role-based DELETE JWT smoke runner contract", () => {
   });
 
   it("does not apply migrations or use supabase db push", () => {
-    // Allow documentation comments; forbid executable apply commands
     assert.doesNotMatch(executable, /\bnpm\s+run\s+.*db\s+push\b/i);
     assert.doesNotMatch(executable, /\bexecSync\([^)]*db\s+push/i);
     assert.doesNotMatch(executable, /insert into\s+auth\.users/i);
@@ -129,9 +127,40 @@ describe("staging role-based DELETE JWT smoke runner contract", () => {
     assert.match(workflow, /node-version: "22"/);
     assert.match(workflow, /dezonafotwyvvghbccko/);
     assert.match(workflow, /STAGING_MIGRATION_011_CONFIRMED/);
-    // Comments may mention the forbidden command; executable steps must not run it
     assert.doesNotMatch(workflow, /^\s*run:\s*.*supabase\s+db\s+push/m);
     assert.doesNotMatch(workflow, /^\s*run:\s*.*db\s+push/m);
     assert.match(workflow, /never applies migrations/i);
+  });
+
+  it("registers each disposable user id immediately after create for partial-setup cleanup", () => {
+    const createRe = /const (id\w+) = await createDisposable\([^;]+;\s*\n\s*userIds\.push\(\1\);/g;
+    const matches = [...runner.matchAll(createRe)];
+    assert.equal(matches.length, 4, `expected 4 immediate userIds.push after createDisposable, got ${matches.length}`);
+    assert.doesNotMatch(
+      runner,
+      /createDisposable\([\s\S]*createDisposable\([\s\S]*createDisposable\([\s\S]*createDisposable\([\s\S]*userIds\.push\(idOwnerA, idOwnerB, idAdminA, idAgentA\)/,
+    );
+  });
+
+  it("fails positive Owner/Admin DELETE read-back on error (no false PASS)", () => {
+    assert.match(runner, /function safeErrorDetail/);
+    assert.match(runner, /R-ADMIN-DEL-[\s\S]{0,400}if \(check\.error\)/);
+    assert.match(runner, /R-OWNER-DEL-[\s\S]{0,400}if \(check\.error\)/);
+    assert.match(runner, /read-back error after admin DELETE/);
+    assert.match(runner, /read-back error after owner DELETE/);
+    assert.match(runner, /else if \(check\.exists\)[\s\S]{0,120}row still present after admin DELETE/);
+    assert.match(runner, /else if \(check\.exists\)[\s\S]{0,120}row still present after owner DELETE/);
+  });
+
+  it("requires count===0 and rejects auth/fk/other on negative DELETE denials", () => {
+    assert.match(runner, /function isValidDeleteDenial/);
+    assert.match(runner, /if \(del\.count !== 0\) return false/);
+    assert.match(runner, /del\.kind === "auth" \|\| del\.kind === "fk" \|\| del\.kind === "other"/);
+    assert.match(runner, /isValidDeleteDenial\(del\)/);
+    const helperUses = [...runner.matchAll(/isValidDeleteDenial\(del\)/g)];
+    assert.ok(helperUses.length >= 2, "isValidDeleteDenial must be used for agent and tenant negatives");
+    const agentIdx = runner.indexOf("R-AGENT-DENY");
+    const tenantIdx = runner.indexOf("R-TENANT-ADMIN-ORGB");
+    assert.ok(agentIdx > 0 && tenantIdx > agentIdx);
   });
 });
