@@ -105,12 +105,31 @@ Enforcement:
 - `activities` remain append-only for every authenticated role (no DELETE/UPDATE policy; grants stay SELECT+INSERT).
 - Application still defaults to the Dexie repository; UI delete-button gating is deferred to the cloud-adapter activation phase.
 
+### Hosted migration status (Staging)
+
+| Migration | Staging status |
+|-----------|----------------|
+| 009 cloud business data foundation | **Applied** on Staging |
+| 010 cloud business foreign-key indexes | **Git-only** — must not be applied in this mission |
+| 011 role-based business DELETE | **Not applied** on Staging — Git-only until a separate authorized process applies it |
+
 ### Isolated / local proof status
 
 | Environment | Status |
 |-------------|--------|
-| Isolated Postgres P0 (PG15/16/17) | Intended proof surface for Migration 011 role matrix |
-| Staging | **NOT run** — no hosted migration apply; no Staging role-DELETE verification |
+| Isolated Postgres P0 (PG15/16/17) | **Green** — R1–R7 and T1–T6 (incl. T2b) on PG 15/16/17 |
+| Staging role-DELETE JWT smoke | **Prepared, NOT RUN** — runner + workflow exist; dual confirmation required; blocked until Migration 011 is applied on Staging |
 | Production | **NOT run** |
 
-Do not interpret isolated green results as Staging or Production authorization proof.
+Opt-in Staging runner (does not run on push/PR):
+
+- Script: `scripts/staging-role-based-delete-jwt-smoke.mjs` (`npm run test:staging-role-delete`)
+- Workflow: `.github/workflows/staging-role-based-delete-jwt-smoke.yml` (`workflow_dispatch` only)
+- Branch pin: `feat/etehad-role-based-business-delete-20261114`
+- Environment: `etehad-staging-security`
+- Inputs (both default false; both must be true): `confirm_staging_run`, `confirm_migration_011_already_applied`
+- Env gate: `STAGING_MIGRATION_011_CONFIRMED=true` required inside the runner before any mutating request
+- Service role limited to disposable user create, Admin/Agent membership provision, and cleanup
+- Business DELETE assertions use real Owner/Admin/Agent session JWTs only
+
+Do not interpret isolated green results as Staging or Production authorization proof. Do not dispatch the Staging role-DELETE workflow until Migration 011 has been applied on Staging by a separate authorized process.
