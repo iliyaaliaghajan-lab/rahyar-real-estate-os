@@ -1,0 +1,65 @@
+# Opt-in live Staging JWT + Data API smoke for Migration 011 role-based DELETE.
+# Never runs on push or pull_request.
+# Requires GitHub Environment "etehad-staging-security" with secrets:
+#   STAGING_SUPABASE_ANON_KEY
+#   STAGING_SUPABASE_SERVICE_ROLE_KEY
+# Both confirm_staging_run and confirm_migration_011_already_applied must be true.
+# This workflow never applies migrations (no supabase db push / SQL apply).
+name: Staging role-based DELETE JWT smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_staging_run:
+        description: >-
+          Set to true only to run the live Staging role-based DELETE JWT smoke against
+          project dezonafotwyvvghbccko. Default false refuses the run.
+        required: true
+        type: boolean
+        default: false
+      confirm_migration_011_already_applied:
+        description: >-
+          Set to true only after Migration 011 has already been applied on Staging
+          by a separate authorized process. This workflow never applies migrations.
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  staging-role-based-delete-jwt-smoke:
+    name: Staging role-based DELETE JWT smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Branch pin + dual explicit confirmation. No push/PR triggers above.
+    if: >-
+      github.ref == 'refs/heads/feat/etehad-role-based-business-delete-20261114'
+      && inputs.confirm_staging_run == true
+      && inputs.confirm_migration_011_already_applied == true
+    environment:
+      name: etehad-staging-security
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run staging role-based DELETE JWT smoke
+        env:
+          STAGING_SUPABASE_URL: https://dezonafotwyvvghbccko.supabase.co
+          STAGING_SECURITY_TEST_CONFIRM: dezonafotwyvvghbccko
+          STAGING_MIGRATION_011_CONFIRMED: "true"
+          STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run test:staging-role-delete

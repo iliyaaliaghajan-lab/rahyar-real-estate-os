@@ -16,6 +16,7 @@ on:
       - feat/etehad-next16-upgrade
       - feat/etehad-cloud-data-foundation-20261112
       - feat/etehad-supabase-repository-adapter-20261113
+      - feat/etehad-role-based-business-delete-20261114
 
 jobs:
   check:

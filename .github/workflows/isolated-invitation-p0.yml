@@ -6,6 +6,7 @@ on:
     branches:
       - ai/etehad-integration-dryrun-20261030
       - feat/etehad-cloud-data-foundation-20261112
+      - feat/etehad-role-based-business-delete-20261114
   pull_request:
     branches:
       - fix/staging-security-audit-v2
