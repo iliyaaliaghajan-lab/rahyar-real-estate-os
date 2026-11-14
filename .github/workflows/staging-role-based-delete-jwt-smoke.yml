@@ -55,7 +55,7 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
- - name: Run staging role-based DELETE JWT smoke
+      - name: Run staging role-based DELETE JWT smoke
         env:
           STAGING_SUPABASE_URL: https://dezonafotwyvvghbccko.supabase.co
           STAGING_SECURITY_TEST_CONFIRM: dezonafotwyvvghbccko
