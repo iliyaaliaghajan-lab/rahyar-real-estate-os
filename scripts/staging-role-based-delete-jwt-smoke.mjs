@@ -94,6 +94,26 @@ async function jwtExists(client, table, id) {
   return { exists: !!res.data?.id, error: null };
 }
 
+/** Safe detail for logs: code/kind only — never tokens or secrets. */
+function safeErrorDetail(error) {
+  if (!error) return "none";
+  const code = error.code || error.status || "";
+  const kind = denialKind(error);
+  return `kind=${kind}${code ? ` code=${code}` : ""}`;
+}
+
+/**
+ * Valid negative DELETE denial:
+ * - deleted count must be exactly 0
+ * - kind must be permission or none (RLS filter with empty result)
+ * - auth / fk / other are never accepted as authorization denial
+ */
+function isValidDeleteDenial(del) {
+  if (del.count !== 0) return false;
+  if (del.kind === "auth" || del.kind === "fk" || del.kind === "other") return false;
+  return del.kind === "permission" || del.kind === "none";
+}
+
 async function main() {
   const { url, anonKey, serviceKey } = loadConfig();
   const runId = randomBytes(6).toString("hex");
@@ -126,11 +146,16 @@ async function main() {
   };
 
   try {
+    // Register each disposable user id immediately after create so partial
+    // setup failures still clean up earlier users in the finally block.
     const idOwnerA = await createDisposable(admin, emails.ownerA, runId, "ownerA");
+    userIds.push(idOwnerA);
     const idOwnerB = await createDisposable(admin, emails.ownerB, runId, "ownerB");
+    userIds.push(idOwnerB);
     const idAdminA = await createDisposable(admin, emails.adminA, runId, "adminA");
+    userIds.push(idAdminA);
     const idAgentA = await createDisposable(admin, emails.agentA, runId, "agentA");
-    userIds.push(idOwnerA, idOwnerB, idAdminA, idAgentA);
+    userIds.push(idAgentA);
 
     sessions.ownerA = await sessionFor(url, anonKey, admin, emails.ownerA, idOwnerA);
     sessions.ownerB = await sessionFor(url, anonKey, admin, emails.ownerB, idOwnerB);
@@ -224,14 +249,18 @@ async function main() {
     for (const [setLabel, set] of [["agent-own", seed.agent], ["owner-created", seed.owner]]) {
       for (const [table, id] of [["follow_ups", set.fu], ["needs", set.need], ["properties", set.prop], ["clients", set.client]]) {
         const del = await jwtDelete(sessions.agentA, table, id);
-        const blocked = (del.count === 0 && (!del.error || del.kind === "permission" || del.kind === "none")) || del.kind === "permission";
-        if (!blocked || del.kind === "auth" || del.kind === "fk" || del.kind === "other") {
+        if (!isValidDeleteDenial(del)) {
           record(`R-AGENT-DENY-${setLabel}-${table}`, "FAIL", `unexpected delete outcome count=${del.count} kind=${del.kind}`);
           continue;
         }
         const check = await jwtExists(sessions.ownerA, table, id);
-        if (!check.exists) record(`R-AGENT-DENY-${setLabel}-${table}`, "FAIL", "row missing after agent DELETE attempt");
-        else record(`R-AGENT-DENY-${setLabel}-${table}`, "PASS", `agent delete blocked (count=${del.count} kind=${del.kind})`);
+        if (check.error) {
+          record(`R-AGENT-DENY-${setLabel}-${table}`, "FAIL", `read-back error after agent DELETE (${safeErrorDetail(check.error)})`);
+        } else if (!check.exists) {
+          record(`R-AGENT-DENY-${setLabel}-${table}`, "FAIL", "row missing after agent DELETE attempt");
+        } else {
+          record(`R-AGENT-DENY-${setLabel}-${table}`, "PASS", `agent delete blocked (count=${del.count} kind=${del.kind})`);
+        }
       }
     }
 
@@ -239,8 +268,11 @@ async function main() {
       const del = await jwtDelete(sessions.adminA, table, id);
       if (del.count !== 1 || del.error) { record(`R-ADMIN-DEL-${table}`, "FAIL", `expected 1 deleted, got count=${del.count} kind=${del.kind}`); continue; }
       const check = await jwtExists(sessions.ownerA, table, id);
-      if (check.exists) record(`R-ADMIN-DEL-${table}`, "FAIL", "row still present after admin DELETE");
-      else {
+      if (check.error) {
+        record(`R-ADMIN-DEL-${table}`, "FAIL", `read-back error after admin DELETE (${safeErrorDetail(check.error)})`);
+      } else if (check.exists) {
+        record(`R-ADMIN-DEL-${table}`, "FAIL", "row still present after admin DELETE");
+      } else {
         record(`R-ADMIN-DEL-${table}`, "PASS", "admin deleted agent-created row");
         if (table === "follow_ups") seed.agent.fu = null;
         if (table === "needs") seed.agent.need = null;
@@ -253,8 +285,11 @@ async function main() {
       const del = await jwtDelete(sessions.ownerA, table, id);
       if (del.count !== 1 || del.error) { record(`R-OWNER-DEL-${table}`, "FAIL", `expected 1 deleted, got count=${del.count} kind=${del.kind}`); continue; }
       const check = await jwtExists(sessions.ownerA, table, id);
-      if (check.exists) record(`R-OWNER-DEL-${table}`, "FAIL", "row still present after owner DELETE");
-      else {
+      if (check.error) {
+        record(`R-OWNER-DEL-${table}`, "FAIL", `read-back error after owner DELETE (${safeErrorDetail(check.error)})`);
+      } else if (check.exists) {
+        record(`R-OWNER-DEL-${table}`, "FAIL", "row still present after owner DELETE");
+      } else {
         record(`R-OWNER-DEL-${table}`, "PASS", "owner deleted own-org row");
         if (table === "follow_ups") seed.owner.fu = null;
         if (table === "needs") seed.owner.need = null;
@@ -265,13 +300,17 @@ async function main() {
 
     {
       const del = await jwtDelete(sessions.adminA, "clients", seed.orgB.client);
-      const blocked = (del.count === 0 && (!del.error || del.kind === "permission" || del.kind === "none")) || del.kind === "permission";
-      if (!blocked || del.kind === "auth" || del.kind === "fk" || del.kind === "other") {
+      if (!isValidDeleteDenial(del)) {
         record("R-TENANT-ADMIN-ORGB", "FAIL", `unexpected outcome count=${del.count} kind=${del.kind}`);
       } else {
         const check = await jwtExists(sessions.ownerB, "clients", seed.orgB.client);
-        if (!check.exists) record("R-TENANT-ADMIN-ORGB", "FAIL", "OrgB client missing after Admin A DELETE attempt");
-        else record("R-TENANT-ADMIN-ORGB", "PASS", "Admin A cannot delete OrgB client; Owner B still sees it");
+        if (check.error) {
+          record("R-TENANT-ADMIN-ORGB", "FAIL", `read-back error (${safeErrorDetail(check.error)})`);
+        } else if (!check.exists) {
+          record("R-TENANT-ADMIN-ORGB", "FAIL", "OrgB client missing after Admin A DELETE attempt");
+        } else {
+          record("R-TENANT-ADMIN-ORGB", "PASS", "Admin A cannot delete OrgB client; Owner B still sees it");
+        }
       }
     }
 
