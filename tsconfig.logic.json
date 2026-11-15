@@ -22,6 +22,8 @@
     "src/lib/auth/organization.ts",
     "src/lib/supabase/client.ts",
     "src/lib/db/db.ts",
+    "src/lib/db/backup",
+    "src/lib/db/maintenance.ts",
     "tests"
   ]
 }
