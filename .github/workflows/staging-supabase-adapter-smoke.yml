@@ -1,0 +1,54 @@
+name: Staging Supabase Adapter Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_staging_run:
+        description: "Type true to confirm this run targets Staging only (dezonafotwyvvghbccko)"
+        required: true
+        type: boolean
+        default: false
+      confirm_migration_011_already_applied:
+        description: "Type true only if Migration 011 is already applied on Staging (this workflow never applies DDL)"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  adapter-smoke:
+    name: Supabase adapter JWT smoke (Staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: etehad-staging-security
+    if: >-
+      github.event.inputs.confirm_staging_run == 'true' &&
+      github.event.inputs.confirm_migration_011_already_applied == 'true' &&
+      github.ref == 'refs/heads/feat/etehad-supabase-adapter-staging-smoke-20261116'
+    steps:
+      - name: Refuse unexpected ref
+        if: github.ref != 'refs/heads/feat/etehad-supabase-adapter-staging-smoke-20261116'
+        run: |
+          echo "Refusing to run on unexpected ref: ${{ github.ref }}"
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run staging Supabase adapter smoke
+        env:
+          STAGING_SUPABASE_URL: https://dezonafotwyvvghbccko.supabase.co
+          STAGING_SECURITY_TEST_CONFIRM: dezonafotwyvvghbccko
+          STAGING_MIGRATION_011_CONFIRMED: "true"
+          STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run test:staging-supabase-adapter
