@@ -34,7 +34,9 @@ function isTimestamp(n: unknown): n is number {
 function isCalendarDate(s: unknown): s is string {
   if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const [y, m, d] = s.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
+  const dt = new Date(0);
+  dt.setUTCFullYear(y, m - 1, d);
+  dt.setUTCHours(0, 0, 0, 0);
   return (
     dt.getUTCFullYear() === y &&
     dt.getUTCMonth() === m - 1 &&
@@ -62,7 +64,9 @@ function isIsoUtcTimestamp(s: unknown): s is string {
   if (mo < 1 || mo > 12) return false;
   if (d < 1 || d > 31) return false;
   if (h > 23 || mi > 59 || se > 59) return false;
-  const dt = new Date(Date.UTC(y, mo - 1, d, h, mi, se, ms));
+  const dt = new Date(0);
+  dt.setUTCFullYear(y, mo - 1, d);
+  dt.setUTCHours(h, mi, se, ms);
   if (Number.isNaN(dt.getTime())) return false;
   // Round-trip: must equal the canonical toISOString form
   return dt.toISOString() === s;

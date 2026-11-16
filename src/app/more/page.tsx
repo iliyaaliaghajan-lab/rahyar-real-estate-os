@@ -84,7 +84,7 @@ export default function MorePage() {
       const text = await file.text();
       // Validation + preview must never write to Dexie.
       const validation = await validateBackupInput(text);
-      const p = await buildRestorePreview(text);
+      const p = await buildRestorePreview(text, validation);
       setPreview(p);
       setNormalizedBackup(validation.normalized);
       if (!p.canRestore) {
@@ -226,6 +226,12 @@ export default function MorePage() {
                 <p>
                   <span className="font-medium">کنترل یکپارچگی:</span>{' '}
                   {preview.checksumValid ? 'معتبر' : 'نامعتبر'}
+                </p>
+              )}
+              {preview.formatVersion === 1 && (
+                <p className="rounded border border-amber-200 bg-amber-50 p-2 text-amber-900">
+                  نسخه پشتیبان ۱ فاقد checksum است؛ ساختار داده بررسی می‌شود، اما
+                  دستکاری یا اصالت فایل از طریق checksum قابل تشخیص نیست.
                 </p>
               )}
               <div className="grid grid-cols-2 gap-2 text-xs">

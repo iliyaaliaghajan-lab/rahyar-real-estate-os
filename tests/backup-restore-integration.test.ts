@@ -1,5 +1,5 @@
 /**
- * Dexie restore integration tests (scenarios A–D) covering all five business stores.
+ * Dexie restore integration tests (scenarios A–E) covering all five business stores.
  *
  * Requires IndexedDB (browser) or fake-indexeddb in Node.
  * Without either: suite is skipped and must be reported as BLOCKED (not PASS).
@@ -263,13 +263,22 @@ describe('backup restore integration (Dexie)', { skip: !hasIndexedDB }, () => {
     assert.deepEqual(await db.followUps.toArray(), [oldFollowUp]);
     assert.deepEqual(await db.activities.toArray(), [oldActivity]);
   });
+
+  it('E — tampered backup is rejected before any store or metadata is changed', async () => {
+    await seedBaseline();
+    const backup = await makeBackup();
+    backup.checksum = '0'.repeat(64);
+
+    await assert.rejects(() => atomicReplaceRestore(backup), /checksum/i);
+    await assertOldState();
+  });
 });
 
 describe('backup restore integration environment', () => {
   it('reports IndexedDB availability (BLOCKED when missing)', () => {
     if (!hasIndexedDB) {
       console.log(
-        'BLOCKED: no IndexedDB / fake-indexeddb; scenarios A–D not executed',
+        'BLOCKED: no IndexedDB / fake-indexeddb; scenarios A–E not executed',
       );
     }
     assert.ok(true);

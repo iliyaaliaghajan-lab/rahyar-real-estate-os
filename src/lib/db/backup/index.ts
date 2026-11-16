@@ -43,13 +43,16 @@ export { atomicReplaceRestore, RestoreError } from './restore';
 
 import { getCurrentCounts } from './export';
 import { validateBackupInput } from './validate';
-import type { RestorePreview } from './types';
+import type { RestorePreview, ValidationResult } from './types';
 
 /**
  * Build a restore preview from file content. Never writes to Dexie.
  */
-export async function buildRestorePreview(fileContent: string): Promise<RestorePreview> {
-  const validation = await validateBackupInput(fileContent);
+export async function buildRestorePreview(
+  fileContent: string,
+  prevalidated?: ValidationResult,
+): Promise<RestorePreview> {
+  const validation = prevalidated ?? (await validateBackupInput(fileContent));
   const currentCounts = await getCurrentCounts();
 
   if (!validation.ok || !validation.normalized) {

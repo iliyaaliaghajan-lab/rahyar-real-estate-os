@@ -148,6 +148,30 @@ describe('backup validate', () => {
     assert.ok(r.issues.some((i) => i.code === 'date'));
   });
 
+  it('accepts year 0099 calendar dates and rejects invalid leap days', async () => {
+    const validFollowUp = {
+      id: 'f-low-year',
+      title: 'تماس',
+      clientId: 'c1',
+      propertyId: null,
+      dueDate: '0099-02-28',
+      status: 'pending' as const,
+      notes: '',
+      createdAt: 1_700_000_000_000,
+      updatedAt: 1_700_000_000_000,
+    };
+    const validBackup = await makeV2({ followUps: [validFollowUp] });
+    const validResult = await validateBackupInput(validBackup);
+    assert.equal(validResult.ok, true);
+
+    const invalidBackup = await makeV2({
+      followUps: [{ ...validFollowUp, dueDate: '0099-02-29' }],
+    });
+    const invalidResult = await validateBackupInput(invalidBackup);
+    assert.equal(invalidResult.ok, false);
+    assert.ok(invalidResult.issues.some((issue) => issue.code === 'date'));
+  });
+
   it('accepts and upgrades valid v1 legacy with checksumValid null', async () => {
     const v1 = {
       app: 'rahyar',
@@ -176,6 +200,12 @@ describe('backup validate', () => {
 
   it('v2 accepts valid ISO UTC exportedAt', async () => {
     const b = await makeV2({ exportedAt: '2026-11-14T12:00:00.000Z' });
+    const r = await validateBackupInput(b);
+    assert.equal(r.ok, true);
+  });
+
+  it('v2 accepts ISO UTC timestamps in year 0099', async () => {
+    const b = await makeV2({ exportedAt: '0099-01-01T00:00:00.000Z' });
     const r = await validateBackupInput(b);
     assert.equal(r.ok, true);
   });

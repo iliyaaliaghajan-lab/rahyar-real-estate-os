@@ -8,11 +8,13 @@
  * - Preserve all other meta keys.
  * Any failure rolls back the entire transaction — including a newly created device id.
  *
- * File selection / preview / validation never call this.
+ * This function revalidates and snapshots the payload before opening the
+ * destructive transaction. The caller still owns explicit user confirmation.
  * No restore-related writes run outside the main transaction.
  */
 
 import { db } from '../db';
+import { validateBackupInput } from './validate';
 import {
   META_DATA_LINEAGE_ID,
   META_DEVICE_INSTANCE_ID,
@@ -44,6 +46,30 @@ export async function atomicReplaceRestore(
   backup: BackupV2,
   options: RestoreOptions = {},
 ): Promise<void> {
+  // Validate at the destructive boundary; callers cannot bypass checksum,
+  // shape, enum, duplicate-ID, or foreign-key checks by calling this API directly.
+  // Detach from caller-owned objects so the validated payload cannot be mutated
+  // between checksum verification and the IndexedDB transaction.
+  let candidate: unknown;
+  try {
+    candidate =
+      typeof globalThis.structuredClone === 'function'
+        ? globalThis.structuredClone(backup)
+        : JSON.parse(JSON.stringify(backup));
+  } catch {
+    throw new RestoreError('Backup payload could not be copied safely');
+  }
+
+  const validation = await validateBackupInput(candidate);
+  if (!validation.ok || validation.parsed?.kind !== 'v2' || !validation.normalized) {
+    const details = validation.issues
+      .slice(0, 3)
+      .map((issue) => (issue.path ? issue.path + ': ' + issue.message : issue.message))
+      .join('; ');
+    throw new RestoreError('Backup validation failed: ' + (details || 'invalid Backup v2'));
+  }
+  const safeBackup = validation.normalized;
+
   await db.transaction(
     'rw',
     [
@@ -83,11 +109,11 @@ export async function atomicReplaceRestore(
       }
 
       // 3. Bulk insert business data
-      if (backup.properties.length) await db.properties.bulkPut(backup.properties);
-      if (backup.clients.length) await db.clients.bulkPut(backup.clients);
-      if (backup.needs.length) await db.needs.bulkPut(backup.needs);
-      if (backup.followUps.length) await db.followUps.bulkPut(backup.followUps);
-      if (backup.activities.length) await db.activities.bulkPut(backup.activities);
+      if (safeBackup.properties.length) await db.properties.bulkPut(safeBackup.properties);
+      if (safeBackup.clients.length) await db.clients.bulkPut(safeBackup.clients);
+      if (safeBackup.needs.length) await db.needs.bulkPut(safeBackup.needs);
+      if (safeBackup.followUps.length) await db.followUps.bulkPut(safeBackup.followUps);
+      if (safeBackup.activities.length) await db.activities.bulkPut(safeBackup.activities);
 
       // 4. Identity metadata: preserve deviceInstanceId, update dataLineageId only.
       // Unrelated meta keys are never cleared.
@@ -97,7 +123,7 @@ export async function atomicReplaceRestore(
       });
       await db.meta.put({
         key: META_DATA_LINEAGE_ID,
-        value: backup.dataLineageId,
+        value: safeBackup.dataLineageId,
       });
 
       if (options.injectFailureAfterMeta) {
