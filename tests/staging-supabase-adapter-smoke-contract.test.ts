@@ -11,7 +11,7 @@ const root = process.cwd();
 
 describe('staging supabase adapter smoke contract', () => {
   it('runner pins Staging origin and refuses Production ref', () => {
-    const src = readFileSync(join(root, 'scripts/staging-supabase-adapter-smoke.ts'), 'utf8');
+    const src = readFileSync(join(root, 'scripts/staging-supabase-adapter-smoke-lib.ts'), 'utf8') + readFileSync(join(root, 'scripts/staging-supabase-adapter-smoke.ts'), 'utf8');
     assert.match(src, /dezonafotwyvvghbccko\.supabase\.co/);
     assert.match(src, /gguvmewknanhzukugvpj/);
     assert.match(src, /STAGING_MIGRATION_011_CONFIRMED/);
