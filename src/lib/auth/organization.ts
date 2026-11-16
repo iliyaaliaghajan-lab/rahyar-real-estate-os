@@ -1,3 +1,4 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
 
 export type MemberRole = 'owner' | 'admin' | 'agent';
@@ -14,17 +15,22 @@ export interface CurrentMembership {
  *
  * Phase 1 enforces at most one active organization per user.
  * If multiple active rows exist, returns null (does not pick arbitrarily).
+ *
+ * Optional `supabase` injects a client (e.g. JWT session under test).
+ * When omitted, behavior is identical to the previous browser-client default.
  */
-export async function getCurrentMembership(): Promise<CurrentMembership | null> {
-  const supabase = createClient();
+export async function getCurrentMembership(
+  supabase?: SupabaseClient,
+): Promise<CurrentMembership | null> {
+  const client = supabase ?? createClient();
 
   const {
     data: { user },
-  } = await supabase.auth.getUser();
+  } = await client.auth.getUser();
 
   if (!user) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await client
     .from('organization_members')
     .select(
       `
@@ -43,7 +49,6 @@ export async function getCurrentMembership(): Promise<CurrentMembership | null> 
     return null;
   }
 
-  // Do not silently choose among multiple orgs
   if (data.length > 1) {
     console.warn(
       '[getCurrentMembership] multiple active memberships; refusing arbitrary selection',
