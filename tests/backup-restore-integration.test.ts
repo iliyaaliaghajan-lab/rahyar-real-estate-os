@@ -6,8 +6,9 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import 'fake-indexeddb/auto';
 
-const hasIndexedDB = typeof globalThis.indexedDB !== 'undefined';
+const hasIndexedDB = Reflect.has(globalThis, 'indexedDB');
 
 describe('backup restore integration (Dexie)', { skip: !hasIndexedDB }, () => {
   let db: typeof import('../src/lib/db/db').db;
