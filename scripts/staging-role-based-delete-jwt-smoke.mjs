@@ -186,17 +186,38 @@ async function main() {
     }).select("id, role, status").single();
     if (memAgent.error || memAgent.data?.role !== "agent") throw new Error("agent membership provision failed");
 
-    for (const [label, client, expectedRole, expectedOrg] of [
-      ["ownerA", sessions.ownerA, "owner", orgAId],
-      ["ownerB", sessions.ownerB, "owner", orgBId],
-      ["adminA", sessions.adminA, "admin", orgAId],
-      ["agentA", sessions.agentA, "agent", orgAId],
+    for (const [label, client, expectedRole, expectedOrg, expectedUserId, expectedMembershipCount] of [
+      ["ownerA", sessions.ownerA, "owner", orgAId, idOwnerA, 3],
+      ["ownerB", sessions.ownerB, "owner", orgBId, idOwnerB, 1],
+      ["adminA", sessions.adminA, "admin", orgAId, idAdminA, 3],
+      ["agentA", sessions.agentA, "agent", orgAId, idAgentA, 3],
     ]) {
-      const m = await client.from("organization_members").select("organization_id, role, status").eq("status", "active").maybeSingle();
+      const m = await client
+        .from("organization_members")
+        .select("organization_id, user_id, role, status")
+        .eq("user_id", expectedUserId)
+        .eq("organization_id", expectedOrg)
+        .eq("status", "active")
+        .maybeSingle();
+
       if (m.error || !m.data) throw new Error(`membership read-back failed for ${label}`);
-      if (m.data.role !== expectedRole || m.data.organization_id !== expectedOrg) throw new Error(`membership role/org mismatch for ${label}`);
-      const all = await client.from("organization_members").select("id").eq("status", "active");
-      if (all.error || (all.data || []).length !== 1) throw new Error(`phase-1 membership count invalid for ${label}`);
+      if (
+        m.data.role !== expectedRole ||
+        m.data.organization_id !== expectedOrg ||
+        m.data.user_id !== expectedUserId
+      ) {
+        throw new Error(`membership role/org/user mismatch for ${label}`);
+      }
+
+      const all = await client
+        .from("organization_members")
+        .select("id")
+        .eq("organization_id", expectedOrg)
+        .eq("status", "active");
+
+      if (all.error || (all.data || []).length !== expectedMembershipCount) {
+        throw new Error(`visible organization membership count invalid for ${label}`);
+      }
     }
     record("SETUP-MEMBERSHIP", "PASS", "roles read back from organization_members (not user_metadata)");
 
