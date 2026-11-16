@@ -13,7 +13,8 @@
     "test": "tsx --test tests/*.test.ts",
     "test:staging-security": "node scripts/staging-security-smoke.mjs",
     "test:staging-cloud-data": "node scripts/staging-cloud-data-jwt-smoke.mjs",
-    "test:db-integration": "scripts/isolated-pg/run_invitation_p0.sh && scripts/isolated-pg/run_tenant_isolation_p0.sh"
+    "test:db-integration": "scripts/isolated-pg/run_invitation_p0.sh && scripts/isolated-pg/run_tenant_isolation_p0.sh",
+    "test:staging-role-delete": "node scripts/staging-role-based-delete-jwt-smoke.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",
@@ -32,6 +33,7 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^9.39.5",
     "eslint-config-next": "^16.4.3",
+    "fake-indexeddb": "6.2.8",
     "postcss": "^8.4.41",
     "tailwindcss": "^3.4.10",
     "tsx": "^4.19.0",

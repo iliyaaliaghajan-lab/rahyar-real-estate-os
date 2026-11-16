@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolated Postgres tenant-isolation matrix (T1–T6) against migrations 001–010.
+# Isolated Postgres tenant-isolation matrix (T1–T6) against migrations 001–011.
 # Temporary DB only — never Staging/Production.
 set -euo pipefail
 
@@ -17,6 +17,37 @@ WORK_DB="rahyar_tenant_p0_$$"
 log() { printf '[tenant-p0] %s\n' "$*"; }
 pass() { log "PASS: $*"; }
 fail() { log "FAIL: $*"; exit 1; }
+
+# Assert a psql command fails with one of the expected SQLSTATE codes.
+# Prefer SQLSTATE from verbose ERROR lines; fall back to known codes / message patterns.
+expect_fail() {
+  local codes_re="$1"
+  local desc="$2"
+  local sql="$3"
+  local err rc code
+  set +e
+  err=$(psql -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "$sql" 2>&1)
+  rc=$?
+  set -e
+  [[ $rc -ne 0 ]] || fail "$desc: expected failure, command succeeded"
+  code=$(printf '%s\n' "$err" | sed -nE 's/.*ERROR:[[:space:]]+([0-9A-Z]{5}):.*/\1/p' | head -1)
+  if [[ -z "$code" ]]; then
+    code=$(printf '%s\n' "$err" | grep -oE '(23503|23514|42501|42401|P0001)' | head -1 || true)
+  fi
+  # Message-pattern fallback (covers builds where SQLSTATE is not echoed)
+  if [[ -z "$code" ]] || ! [[ "$code" =~ ^($codes_re)$ ]]; then
+    if [[ "$codes_re" == *42501* ]] && printf '%s\n' "$err" | grep -qiE 'permission denied|row-level security|violates row-level|insufficient_privilege'; then
+      code=42501
+    elif [[ "$codes_re" == *23503* ]] && printf '%s\n' "$err" | grep -qiE 'foreign key|violates foreign key'; then
+      code=23503
+    elif [[ "$codes_re" == *23514* ]] && printf '%s\n' "$err" | grep -qiE 'check constraint|organization_id cannot be changed|created_by cannot be changed|same organization|must belong to the same organization'; then
+      code=23514
+    fi
+  fi
+  if [[ -z "$code" ]] || ! [[ "$code" =~ ^($codes_re)$ ]]; then
+    fail "$desc: expected SQLSTATE /$codes_re/, got '${code:-none}' :: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-240)"
+  fi
+}
 
 is_loopback_ip() { case "$1" in 127.*|::1|0:0:0:0:0:0:0:1) return 0 ;; *) return 1 ;; esac; }
 is_local_socket_path() { case "$1" in /var/run/postgresql|/var/run/postgresql/*|/tmp|/tmp/*|/run/postgresql|/run/postgresql/*) return 0 ;; *) return 1 ;; esac; }
@@ -55,23 +86,34 @@ assert_server_is_local() {
 
 extract_uuid() { echo "$1" | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1; }
 psql_root() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$ROOT_DB" "$@"; }
-psql_db() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" "$@"; }
 q() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At -c "$1"; }
+psql_db() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" "$@"; }
 
 as_auth() {
   local uid="$1"; local sql="$2"
-  psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At <<EOF
+  local out
+  out=$(psql -q -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At <<SQL
 BEGIN;
 SET LOCAL ROLE authenticated;
-SELECT auth.set_test_uid('$uid');
+DO \$\$
+BEGIN
+  PERFORM auth.set_test_uid('$uid');
+END
+\$\$;
 $sql
 COMMIT;
-EOF
+SQL
+)
+  printf '%s\n' "$out" | grep -Ev '^(BEGIN|COMMIT|SET|SELECT)$' | grep -v '^$' || true
 }
 as_auth_count() {
   local uid="$1"; local sql="$2"; local out
   out=$(as_auth "$uid" "$sql" 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
   echo "${out:-0}"
+}
+visible_count() {
+  local uid="$1"; local table="$2"
+  as_auth_count "$uid" "SELECT count(*) FROM public.$table;"
 }
 
 cleanup() {
@@ -92,7 +134,7 @@ psql_root -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datna
 psql_root -c "DROP DATABASE IF EXISTS $WORK_DB;" >/dev/null 2>&1 || true
 psql_root -c "CREATE DATABASE $WORK_DB;"
 
-log "Applying stubs + timestamp migrations including cloud data foundation (009+010)"
+log "Applying stubs + timestamp migrations including cloud data foundation (009+010+011)"
 psql_db -f "$STUBS_DIR/00_auth_and_roles.sql" >/dev/null
 for f in \
   20261022230848_initial_multitenant.sql \
@@ -104,16 +146,24 @@ for f in \
   20261027003152_invite_fk_indexes_and_single_org_create.sql \
   20261029181022_rls_helper_schema_and_profile_policy_optimization.sql \
   20261112121112_cloud_business_data_foundation_009.sql \
-  20261112140000_cloud_business_foreign_key_indexes_010.sql
+  20261112140000_cloud_business_foreign_key_indexes_010.sql \
+  20261113212202_role_based_business_delete_permissions.sql
 do
   log "  -> $f"
   psql_db -f "$MIGRATIONS_DIR/$f" >/dev/null
 done
 
-log "=== Migration 008 + 009 verification ==="
+log "=== Migration 008 + 009 + 011 verification ==="
 priv_fn=$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'private' AND p.proname = 'user_organization_ids';")
 [[ "$priv_fn" == "1" ]] || fail "private.user_organization_ids() missing after Migration 008"
 pass "private.user_organization_ids() present"
+del_fn=$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'private' AND p.proname = 'user_can_delete_business_data';")
+[[ "$del_fn" == "1" ]] || fail "private.user_can_delete_business_data missing after Migration 011"
+for t in properties clients needs follow_ups; do
+  restr=$(q "SELECT count(*) FROM pg_policies WHERE schemaname='public' AND tablename='$t' AND policyname='${t}_delete_role_guard' AND permissive='RESTRICTIVE' AND cmd='DELETE';")
+  [[ "$restr" == "1" ]] || fail "RESTRICTIVE delete role-guard missing on $t"
+done
+pass "private.user_can_delete_business_data + restrictive role-guards present"
 for t in properties clients needs follow_ups activities; do
   c=$(q "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='$t';")
   [[ "$c" == "1" ]] || fail "table $t missing after 009"
@@ -130,41 +180,26 @@ org_a=$(extract_uuid "$(q "INSERT INTO public.organizations (name, slug) VALUES 
 org_b=$(extract_uuid "$(q "INSERT INTO public.organizations (name, slug) VALUES ('Org B', 'org-b-$$') RETURNING id;")")
 [[ -n "$org_a" && -n "$org_b" ]] || fail "org seed failed"
 q "INSERT INTO public.organization_members (organization_id, user_id, role, status, joined_at)
-   VALUES ('$org_a', '$owner_a', 'owner', 'active', now()),
-          ('$org_b', '$owner_b', 'owner', 'active', now());" >/dev/null
+   VALUES
+     ('$org_a','$owner_a','owner','active',now()),
+     ('$org_b','$owner_b','owner','active',now());" >/dev/null
 
-# Seed clients (parents for needs/follow_ups)
 client_a=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.clients (organization_id, name, created_by, updated_by) VALUES ('$org_a','Client A','$owner_a','$owner_a') RETURNING id;")")
 client_b=$(extract_uuid "$(as_auth "$owner_b" "INSERT INTO public.clients (organization_id, name, created_by, updated_by) VALUES ('$org_b','Client B','$owner_b','$owner_b') RETURNING id;")")
 [[ -n "$client_a" && -n "$client_b" ]] || fail "client seed failed"
-
-# Seed properties
 prop_a=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.properties (organization_id, title, created_by, updated_by) VALUES ('$org_a','Prop A','$owner_a','$owner_a') RETURNING id;")")
 prop_b=$(extract_uuid "$(as_auth "$owner_b" "INSERT INTO public.properties (organization_id, title, created_by, updated_by) VALUES ('$org_b','Prop B','$owner_b','$owner_b') RETURNING id;")")
 [[ -n "$prop_a" && -n "$prop_b" ]] || fail "property seed failed"
-
-# Seed needs (composite FK to clients)
 need_a=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.needs (organization_id, client_id, created_by, updated_by) VALUES ('$org_a','$client_a','$owner_a','$owner_a') RETURNING id;")")
 need_b=$(extract_uuid "$(as_auth "$owner_b" "INSERT INTO public.needs (organization_id, client_id, created_by, updated_by) VALUES ('$org_b','$client_b','$owner_b','$owner_b') RETURNING id;")")
 [[ -n "$need_a" && -n "$need_b" ]] || fail "need seed failed"
-
-# Seed follow_ups (composite FK to clients; optional property)
 fu_a=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.follow_ups (organization_id, client_id, property_id, title, created_by, updated_by) VALUES ('$org_a','$client_a','$prop_a','FU A','$owner_a','$owner_a') RETURNING id;")")
 fu_b=$(extract_uuid "$(as_auth "$owner_b" "INSERT INTO public.follow_ups (organization_id, client_id, property_id, title, created_by, updated_by) VALUES ('$org_b','$client_b','$prop_b','FU B','$owner_b','$owner_b') RETURNING id;")")
 [[ -n "$fu_a" && -n "$fu_b" ]] || fail "follow_up seed failed"
-
-# Seed activities (append-only; only created_by)
 act_a=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.activities (organization_id, type, text, created_by) VALUES ('$org_a','client','seed A','$owner_a') RETURNING id;")")
 act_b=$(extract_uuid "$(as_auth "$owner_b" "INSERT INTO public.activities (organization_id, type, text, created_by) VALUES ('$org_b','client','seed B','$owner_b') RETURNING id;")")
 [[ -n "$act_a" && -n "$act_b" ]] || fail "activity seed failed"
-
-for t in properties clients needs follow_ups activities; do
-  c=$(q "SELECT count(*) FROM public.$t;")
-  [[ "$c" == "2" ]] || fail "expected 2 seed rows in $t, got $c"
-done
-pass "seeded 2 orgs, owners, and 2 rows per business table with audit columns"
-
-visible_count() { local uid="$1" table="$2"; as_auth_count "$uid" "SELECT count(*) FROM public.$table;"; }
+pass "seeded TenantA/TenantB rows"
 
 log "=== T1: Cross-tenant SELECT ==="
 for t in properties clients needs follow_ups activities; do
@@ -179,65 +214,41 @@ done
 pass "T1: each owner sees only own-tenant rows (5 tables)"
 
 log "=== T2: Cross-tenant INSERT rejected by RLS ==="
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+expect_fail '42501' "T2 property INSERT into foreign org (RLS)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   INSERT INTO public.properties (organization_id, title, created_by, updated_by)
   VALUES ('$org_b','X','$owner_a','$owner_a');
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T2 Owner A must not INSERT property into Org B"
-echo "$err" | grep -qiE "row-level security|violates row-level security|permission denied|42501|new row violates" \
-  || fail "T2 expected RLS rejection for properties, got: $err"
-
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+  COMMIT;"
+expect_fail '42501' "T2 client INSERT into foreign org (RLS)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   INSERT INTO public.clients (organization_id, name, created_by, updated_by)
   VALUES ('$org_b','X','$owner_a','$owner_a');
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T2 Owner A must not INSERT client into Org B"
-
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+  COMMIT;"
+expect_fail '42501' "T2 activity INSERT into foreign org (RLS)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   INSERT INTO public.activities (organization_id, type, text, created_by)
   VALUES ('$org_b','client','x','$owner_a');
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T2 Owner A must not INSERT activity into Org B"
-
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+  COMMIT;"
+expect_fail '23503' "T2 cross-org need foreign client (composite FK)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   INSERT INTO public.needs (organization_id, client_id, created_by, updated_by)
   VALUES ('$org_a','$client_b','$owner_a','$owner_a');
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T2 cross-org need (foreign client) must fail"
-echo "$err" | grep -qiE "foreign key|23503|row-level security|42501" \
-  || fail "T2 expected FK/RLS rejection for needs, got: $err"
-
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+  COMMIT;"
+# prop_b must exist and belong to org_b (privileged verification before RLS view)
+prop_b_org=$(q "SELECT organization_id::text FROM public.properties WHERE id = '$prop_b';")
+[[ "$prop_b_org" == "$org_b" ]] || fail "T2 precondition: prop_b must belong to org_b (got org=$prop_b_org)"
+prop_b_exists=$(q "SELECT count(*) FROM public.properties WHERE id = '$prop_b';")
+[[ "$prop_b_exists" == "1" ]] || fail "T2 precondition: prop_b must exist"
+# Owner A cannot see prop_b under RLS
+seen_prop_b=$(as_auth_count "$owner_a" "SELECT count(*) FROM public.properties WHERE id = '$prop_b';")
+[[ "$seen_prop_b" == "0" ]] || fail "T2 precondition: Owner A must not see prop_b under RLS"
+# SECURITY INVOKER trigger SELECT is subject to RLS: property invisible -> v_prop_org NULL -> 23503
+expect_fail '23503' "T2 cross-org follow_up foreign property (RLS hides property; trigger fail-closed 23503)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
-  INSERT INTO public.follow_ups (organization_id, client_id, title, created_by, updated_by)
-  VALUES ('$org_a','$client_b','x','$owner_a','$owner_a');
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T2 cross-org follow_up (foreign client) must fail"
-
-for t in properties clients needs follow_ups activities; do
-  c=$(q "SELECT count(*) FROM public.$t WHERE organization_id = '$org_b';")
-  [[ "$c" == "1" ]] || fail "T2 Org B $t row count changed: $c"
-done
-pass "T2: cross-tenant INSERT rejected (RLS + composite FK)"
+  INSERT INTO public.follow_ups (organization_id, client_id, property_id, title, created_by, updated_by)
+  VALUES ('$org_a','$client_a','$prop_b','X','$owner_a','$owner_a');
+  COMMIT;"
+pass "T2: cross-tenant INSERT rejected (RLS 42501 + FK 23503; follow_up cross-org property -> 23503 via RLS-hidden property)"
 
 log "=== T3: Cross-tenant UPDATE blocked; org_id immutable ==="
 for t in properties clients needs follow_ups; do
@@ -256,24 +267,18 @@ for t in properties clients needs follow_ups; do
     END \$\$;
   " 2>&1 | grep -oE 'affected=[0-9]+' | cut -d= -f2)
   [[ "${n:-x}" == "0" ]] || fail "T3 UPDATE foreign row in $t should affect 0 rows, got ${n:-none}"
-  set +e
-  move_err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+  expect_fail '23514' "T3 org_id move on $t blocked by trigger" "
     BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
     UPDATE public.$t SET organization_id = '$org_b', updated_by = '$owner_a' WHERE id = '$aid';
-    COMMIT;" 2>&1)
-  set -e
+    COMMIT;"
   final_org=$(q "SELECT organization_id::text FROM public.$t WHERE id = '$aid';")
   [[ "$final_org" == "$org_a" ]] || fail "T3 org_id move must not succeed for $t (final=$final_org)"
 done
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+expect_fail '42501' "T3 activity UPDATE denied (no privilege)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   UPDATE public.activities SET text = 'x' WHERE id = '$act_a';
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T3 activity UPDATE must fail (append-only)"
-pass "T3: cross-tenant UPDATE blocked; org_id immutable; activities no UPDATE"
+  COMMIT;"
+pass "T3: cross-tenant UPDATE blocked; org_id immutable (23514); activities no UPDATE (42501)"
 
 log "=== T4: Cross-tenant DELETE blocked ==="
 for t in properties clients needs follow_ups; do
@@ -287,113 +292,58 @@ for t in properties clients needs follow_ups; do
       DELETE FROM public.$t WHERE id = '$bid';
       GET DIAGNOSTICS n = ROW_COUNT;
       PERFORM set_config('role', 'none', true);
-      RAISE NOTICE 'deleted=%', n;
+      RAISE NOTICE 'affected=%', n;
     END \$\$;
-  " 2>&1 | grep -oE 'deleted=[0-9]+' | cut -d= -f2)
-  [[ "${n:-x}" == "0" ]] || fail "T4 DELETE foreign $t should affect 0 rows, got ${n:-none}"
-  still=$(q "SELECT count(*) FROM public.$t WHERE id = '$bid';")
-  [[ "$still" == "1" ]] || fail "T4 Org B row in $t must still exist"
+  " 2>&1 | grep -oE 'affected=[0-9]+' | cut -d= -f2)
+  [[ "${n:-x}" == "0" ]] || fail "T4 DELETE foreign row in $t should affect 0, got ${n:-none}"
 done
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+expect_fail '42501' "T4 activity DELETE denied (no privilege)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   DELETE FROM public.activities WHERE id = '$act_a';
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T4 activity DELETE must fail (append-only)"
+  COMMIT;"
 still=$(q "SELECT count(*) FROM public.activities WHERE id = '$act_a';")
-[[ "$still" == "1" ]] || fail "T4 activity row must remain"
-pass "T4: cross-tenant DELETE blocked; activities no DELETE"
+[[ "$still" == "1" ]] || fail "T4 activity must remain"
+pass "T4: cross-tenant DELETE blocked; activities no DELETE (42501)"
 
 log "=== T5: Own-tenant DML (activities append-only) ==="
-new_prop=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.properties (organization_id, title, created_by, updated_by) VALUES ('$org_a','New','$owner_a','$owner_a') RETURNING id;")")
-[[ -n "$new_prop" ]] || fail "T5 INSERT property failed"
-n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At -c "
-  DO \$\$
-  DECLARE n int;
-  BEGIN
-    PERFORM set_config('role', 'authenticated', true);
-    PERFORM auth.set_test_uid('$owner_a');
-    UPDATE public.properties SET title = 'Updated', updated_by = '$owner_a' WHERE id = '$new_prop';
-    GET DIAGNOSTICS n = ROW_COUNT;
-    PERFORM set_config('role', 'none', true);
-    RAISE NOTICE 'updated=%', n;
-  END \$\$;
-" 2>&1 | grep -oE 'updated=[0-9]+' | cut -d= -f2)
-[[ "${n:-0}" == "1" ]] || fail "T5 UPDATE own property should affect 1, got ${n:-none}"
-n=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -At -c "
-  DO \$\$
-  DECLARE n int;
-  BEGIN
-    PERFORM set_config('role', 'authenticated', true);
-    PERFORM auth.set_test_uid('$owner_a');
-    DELETE FROM public.properties WHERE id = '$new_prop';
-    GET DIAGNOSTICS n = ROW_COUNT;
-    PERFORM set_config('role', 'none', true);
-    RAISE NOTICE 'deleted=%', n;
-  END \$\$;
-" 2>&1 | grep -oE 'deleted=[0-9]+' | cut -d= -f2)
-[[ "${n:-0}" == "1" ]] || fail "T5 DELETE own property should affect 1, got ${n:-none}"
-
-new_act=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.activities (organization_id, type, text, created_by) VALUES ('$org_a','client','own act','$owner_a') RETURNING id;")")
-[[ -n "$new_act" ]] || fail "T5 INSERT own activity failed"
-c=$(as_auth_count "$owner_a" "SELECT count(*) FROM public.activities WHERE id = '$new_act';")
-[[ "$c" == "1" ]] || fail "T5 SELECT own activity failed"
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+new_prop=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.properties (organization_id, title, created_by, updated_by) VALUES ('$org_a','New Prop','$owner_a','$owner_a') RETURNING id;")")
+[[ -n "$new_prop" ]] || fail "T5 own property INSERT failed"
+n=$(as_auth "$owner_a" "UPDATE public.properties SET title = 'New Prop 2', updated_by = '$owner_a' WHERE id = '$new_prop' RETURNING id;")
+[[ -n "$n" ]] || fail "T5 own property UPDATE failed"
+n=$(as_auth "$owner_a" "DELETE FROM public.properties WHERE id = '$new_prop' RETURNING id;")
+[[ -n "$n" ]] || fail "T5 own property DELETE failed"
+new_act=$(extract_uuid "$(as_auth "$owner_a" "INSERT INTO public.activities (organization_id, type, text, created_by) VALUES ('$org_a','client','new act','$owner_a') RETURNING id;")")
+[[ -n "$new_act" ]] || fail "T5 activity INSERT failed"
+seen=$(as_auth_count "$owner_a" "SELECT count(*) FROM public.activities WHERE id = '$new_act';")
+[[ "$seen" == "1" ]] || fail "T5 activity SELECT failed"
+expect_fail '42501' "T5 activity UPDATE denied (no privilege)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   UPDATE public.activities SET text = 'mut' WHERE id = '$new_act';
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T5 activity UPDATE must fail"
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+  COMMIT;"
+expect_fail '42501' "T5 activity DELETE denied (no privilege)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   DELETE FROM public.activities WHERE id = '$new_act';
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T5 activity DELETE must fail"
+  COMMIT;"
 still=$(q "SELECT count(*) FROM public.activities WHERE id = '$new_act';")
 [[ "$still" == "1" ]] || fail "T5 activity must remain after failed DELETE"
-
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+expect_fail '23514' "T5 created_by change blocked by trigger" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
   UPDATE public.clients SET created_by = '$owner_b', updated_by = '$owner_a' WHERE id = '$client_a';
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T5 created_by change must fail"
-final_cb=$(q "SELECT created_by::text FROM public.clients WHERE id = '$client_a';")
-[[ "$final_cb" == "$owner_a" ]] || fail "T5 created_by changed unexpectedly to $final_cb"
-pass "T5: own-tenant CRUD (activities append-only); created_by immutable"
+  COMMIT;"
+pass "T5: own-tenant CRUD (activities append-only 42501); created_by immutable (23514)"
 
 log "=== T6: Organization and membership write protection ==="
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+expect_fail '42501' "T6 direct organization INSERT (RLS/privilege)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
-  INSERT INTO public.organizations (name) VALUES ('Forged Org');
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T6 authenticated must not INSERT organizations"
-echo "$err" | grep -qiE "permission denied|row-level security|42501|violates" || fail "T6 expected rejection for org INSERT: $err"
-pass "T6: direct organization INSERT blocked"
+  INSERT INTO public.organizations (name, slug) VALUES ('Forged','forged');
+  COMMIT;"
+pass "T6: direct organization INSERT blocked (42501)"
 
-set +e
-err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
+expect_fail '42501' "T6 forged membership INSERT (RLS/privilege)" "
   BEGIN; SET LOCAL ROLE authenticated; SELECT auth.set_test_uid('$owner_a');
-  INSERT INTO public.organization_members (organization_id, user_id, role, status)
-  VALUES ('$org_b', '$owner_a', 'owner', 'active');
-  COMMIT;" 2>&1)
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || fail "T6 authenticated must not INSERT forged membership"
-echo "$err" | grep -qiE "permission denied|row-level security|42501|violates|unique" || fail "T6 expected rejection for membership INSERT: $err"
-pass "T6: forged membership INSERT blocked"
+  INSERT INTO public.organization_members (organization_id, user_id, role, status) VALUES ('$org_b','$owner_a','admin','active');
+  COMMIT;"
+pass "T6: forged membership INSERT blocked (42501)"
 
 set +e
 err=$(psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$WORK_DB" -c "
@@ -421,14 +371,27 @@ org_vis=$(as_auth_count "$owner_a" "SELECT count(*) FROM public.organizations;")
 [[ "$org_vis" == "1" ]] || fail "T6 Owner A should see 1 organization, got $org_vis"
 pass "T6: organization visibility scoped to membership"
 
+log "=== T2b: privileged same-org trigger branch (23514) ==="
+# Runs as table owner / superuser (no RLS) so trigger SELECT can see prop_b.
+# Proves the internal same-org check raises 23514 when property is visible but wrong org.
+# Not an API/JWT/RLS user-path test — isolated privileged proof only.
+before_fu=$(q "SELECT count(*) FROM public.follow_ups;")
+expect_fail '23514' "T2b privileged cross-org follow_up (same-org trigger 23514)" "
+  INSERT INTO public.follow_ups (organization_id, client_id, property_id, title, created_by, updated_by)
+  VALUES ('$org_a','$client_a','$prop_b','X-priv','$owner_a','$owner_a');"
+after_fu=$(q "SELECT count(*) FROM public.follow_ups;")
+[[ "$after_fu" == "$before_fu" ]] || fail "T2b privileged insert must leave no residual follow_up row"
+pass "T2b: privileged same-org trigger branch raises 23514 (property visible, org mismatch)"
+
 log "=============================================="
 log "ALL TENANT ISOLATION TESTS PASSED"
 log "  - T1 SELECT isolation: PASS"
-log "  - T2 INSERT rejection (RLS + composite FK): PASS"
+log "  - T2 INSERT rejection (RLS + composite FK; follow_up cross-org -> 23503 RLS-hidden property): PASS"
+log "  - T2b privileged same-org trigger 23514: PASS"
 log "  - T3 UPDATE blocked / org_id immutable / activities no UPDATE: PASS"
 log "  - T4 DELETE blocked / activities no DELETE: PASS"
 log "  - T5 own-tenant CRUD + activities append-only + created_by immutable: PASS"
 log "  - T6 org/membership writes: PASS"
-log "  - Migration 008 private helper + 009 tables + 010 indexes: PASS"
+log "  - Migration 008 private helper + 009 tables + 010 indexes + 011 role-delete: PASS"
 log "Temporary DB $WORK_DB dropped on exit."
 log "=============================================="

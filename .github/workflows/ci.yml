@@ -16,6 +16,7 @@ on:
       - feat/etehad-next16-upgrade
       - feat/etehad-cloud-data-foundation-20261112
       - feat/etehad-supabase-repository-adapter-20261113
+      - feat/etehad-role-based-business-delete-20261114
 
 jobs:
   check:
@@ -40,7 +41,7 @@ jobs:
         run: npm ci --no-audit --no-fund --loglevel=verbose --foreground-scripts --timing
 
       - name: Unit / static contract tests
-        run: npm test
+        run: NODE_OPTIONS='--import=fake-indexeddb/auto' npm test
 
       - name: Typecheck
         run: npm run typecheck

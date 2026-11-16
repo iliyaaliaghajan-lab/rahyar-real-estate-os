@@ -2,9 +2,9 @@
  * Role definitions for multi-tenant access control.
  *
  * These constants document the intended permission model.
- * In this stage they are NOT fully enforced on the server for every
- * operation. Organization creation forces role = 'owner' inside the
- * database function. Broader role-based authorization is a later stage.
+ * Organization creation forces role = 'owner' inside the
+ * database function. Business-record DELETE is enforced by RLS
+ * (Migration 011) via private.user_can_delete_business_data.
  *
  * Database enum (member_role): 'owner' | 'admin' | 'agent'
  */
@@ -20,11 +20,18 @@ export const ROLE_LABELS: Record<Role, string> = {
 };
 
 /**
- * Expected permissions (product intent — not fully enforced yet).
+ * Expected permissions (product intent).
  *
- * owner  — full control of the organization, members, and settings
- * admin  — manage members and organization data (cannot delete the org)
+ * owner  — full control of the organization, members, and settings;
+ *          may delete business records in the own active organization
+ * admin  — manage members and organization data (cannot delete the org);
+ *          may delete business records in the own active organization
  * agent  — work with properties, clients, needs, follow-ups within the org
+ *          (SELECT / INSERT / UPDATE); MUST NOT delete business records
+ *
+ * canManageBusinessData covers SELECT/INSERT/UPDATE for business tables.
+ * canDeleteBusinessData is a separate capability enforced by RLS for DELETE.
+ * canDeleteOrganization remains owner-only and is unrelated to business rows.
  */
 export const ROLE_PERMISSIONS: Record<
   Role,
@@ -33,6 +40,7 @@ export const ROLE_PERMISSIONS: Record<
     canDeleteOrganization: boolean;
     canManageOrgSettings: boolean;
     canManageBusinessData: boolean;
+    canDeleteBusinessData: boolean;
   }
 > = {
   owner: {
@@ -40,18 +48,21 @@ export const ROLE_PERMISSIONS: Record<
     canDeleteOrganization: true,
     canManageOrgSettings: true,
     canManageBusinessData: true,
+    canDeleteBusinessData: true,
   },
   admin: {
     canManageMembers: true,
     canDeleteOrganization: false,
     canManageOrgSettings: true,
     canManageBusinessData: true,
+    canDeleteBusinessData: true,
   },
   agent: {
     canManageMembers: false,
     canDeleteOrganization: false,
     canManageOrgSettings: false,
     canManageBusinessData: true,
+    canDeleteBusinessData: false,
   },
 };
 
