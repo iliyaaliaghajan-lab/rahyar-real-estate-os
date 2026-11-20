@@ -17,6 +17,28 @@ import {
   SUPABASE_LIST_PAGE_SIZE,
 } from '../src/lib/repositories/supabaseRepositories';
 import type { Repositories } from '../src/lib/repositories/types';
+import {
+  classifyListRead,
+  classifyMaybeSingleRead,
+  extractOrganizationIdFromRpc,
+  shouldSkipDisposableUserDelete,
+  classifyMembershipListRows,
+  ownersWithZeroMembershipRows,
+  resolveUnresolvedOwnersAfterDiscovery,
+  type CleanupReadOutcome,
+} from './staging-supabase-adapter-smoke-gate';
+
+// Re-export gate helpers for contract/behavioral tests.
+export {
+  classifyListRead,
+  classifyMaybeSingleRead,
+  extractOrganizationIdFromRpc,
+  shouldSkipDisposableUserDelete,
+  classifyMembershipListRows,
+  ownersWithZeroMembershipRows,
+  resolveUnresolvedOwnersAfterDiscovery,
+};
+export type { CleanupReadOutcome };
 
 const STAGING_ORIGIN = 'https://dezonafotwyvvghbccko.supabase.co';
 const STAGING_CONFIRM = 'dezonafotwyvvghbccko';
@@ -331,12 +353,475 @@ async function checkedDelete(
   }
 }
 
+
+/**
+ * Recover disposable users whose createUser request may have committed remotely
+ * even though the caller did not receive the response. Only exact generated
+ * emails with matching purpose + run_id metadata are eligible for cleanup.
+ * After a normal scan, any email still pending is a cleanup failure. No user id
+ * is guessed from a partial match or from metadata that is not this run.
+ */
+export async function discoverDisposableUserIds(
+  admin: SupabaseClient,
+  uncertainCreateEmails: Set<string>,
+  runId: string,
+  knownUserIds: string[],
+  cleanupFailures: string[],
+): Promise<string[]> {
+  const discovered = new Set(knownUserIds);
+  const pendingEmails = new Set([...uncertainCreateEmails].map((email) => email.toLowerCase()));
+  if (pendingEmails.size === 0) return [...discovered];
+
+  const perPage = 1000;
+  const maxPages = 100;
+  let endedByShortPage = false;
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    let response;
+    try {
+      response = await admin.auth.admin.listUsers({ page, perPage });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      cleanupFailures.push(`user-discovery:exception:${message.slice(0, 80)}`);
+      return [...discovered];
+    }
+    if (response.error) {
+      cleanupFailures.push(`user-discovery:${response.error.code || 'error'}`);
+      return [...discovered];
+    }
+
+    const users = response.data?.users;
+    if (!Array.isArray(users)) {
+      cleanupFailures.push('user-discovery:ambiguous-response');
+      return [...discovered];
+    }
+
+    for (const user of users) {
+      // Fail-closed structural validation: only plain non-null objects are accepted.
+      if (user === null || typeof user !== 'object' || Array.isArray(user)) {
+        cleanupFailures.push('user-discovery:invalid-user-record');
+        return [...discovered];
+      }
+      const record = user as unknown as Record<string, unknown>;
+      const id = record.id;
+      if (typeof id !== 'string' || id.length === 0) {
+        cleanupFailures.push('user-discovery:invalid-user-record');
+        return [...discovered];
+      }
+      // email may be absent; when present it must be a string. Never throw on access.
+      const rawEmail = record.email;
+      if (rawEmail !== undefined && rawEmail !== null && typeof rawEmail !== 'string') {
+        cleanupFailures.push('user-discovery:invalid-user-record');
+        return [...discovered];
+      }
+      const email = typeof rawEmail === 'string' ? rawEmail.toLowerCase() : '';
+      if (!email || !pendingEmails.has(email)) continue;
+
+      const metadata = record.user_metadata;
+      if (
+        metadata === null ||
+        typeof metadata !== 'object' ||
+        Array.isArray(metadata)
+      ) {
+        continue;
+      }
+      const meta = metadata as Record<string, unknown>;
+      if (
+        meta.purpose !== 'staging-supabase-adapter-smoke' ||
+        meta.run_id !== runId
+      ) {
+        continue;
+      }
+      discovered.add(id);
+      pendingEmails.delete(email);
+    }
+
+    if (pendingEmails.size === 0) break;
+    if (users.length < perPage) {
+      endedByShortPage = true;
+      break;
+    }
+  }
+
+  // Fail closed on any unresolved email after a normal scan. This does not
+  // depend on a scanComplete flag: a short final page must not look finished
+  // while expected emails are still missing. Do not log the emails themselves.
+  if (pendingEmails.size > 0) {
+    if (endedByShortPage) {
+      cleanupFailures.push(`user-discovery:end-of-results:unresolved=${pendingEmails.size}`);
+    } else {
+      cleanupFailures.push(`user-discovery:page-limit:unresolved=${pendingEmails.size}`);
+    }
+  }
+  return [...discovered];
+}
+
+/**
+ * Recover organizations created by disposable users if the create-organization
+ * RPC committed but its response was lost. Exact, run-specific organization
+ * names recover orphan candidates even when membership discovery fails.
+ *
+ * An exact name match is sufficient to enqueue only that named org for cleanup;
+ * it is NOT proof of owner identity. ownerOrgLinks is populated only when the
+ * membership row has the expected user_id, role owner, status active, and points
+ * to the organization returned for that owner's exact name.
+ *
+ * Any query error or ambiguous payload sets hadErrors. A zero-membership owner is
+ * cleared from unresolved only when both reads succeeded and no exact-name org
+ * exists for that owner. This prevents a missing/mismatched owner link from
+ * becoming permission to delete the Auth user.
+ */
+export type OrgDiscoveryResult = {
+  organizationIds: string[];
+  /** Confirmed owner userId → organization ids matched in this discovery. */
+  ownerOrgLinks: Map<string, string[]>;
+  hadErrors: boolean;
+  /**
+   * Expected owner user_ids with no membership rows AND no exact-name org row,
+   * after both discovery reads succeeded and were structurally valid.
+   * Empty when hadErrors is true.
+   */
+  ownersWithNoMemberships: ReadonlySet<string>;
+};
+
+export async function discoverOrganizationIds(
+  admin: SupabaseClient,
+  expectedOwners: Array<{ userId: string; organizationName: string }>,
+  knownOrganizationIds: string[],
+  cleanupFailures: string[],
+): Promise<OrgDiscoveryResult> {
+  const discovered = new Set(knownOrganizationIds);
+  const ownerOrgLinks = new Map<string, string[]>();
+  const emptyNoMemberships = new Set<string>();
+
+  // These names contain this run's 128-bit random id. They are exact recovery
+  // keys, not prefixes. Reject duplicate/malformed keys rather than broadening
+  // discovery or allowing an owner to be cleared on ambiguous input.
+  const expectedNameByOwnerId = new Map<string, string>();
+  const expectedOrganizationNames: string[] = [];
+  const seenOwnerIds = new Set<string>();
+  const seenOrganizationNames = new Set<string>();
+  for (const expected of expectedOwners) {
+    if (
+      expected === null ||
+      expected === undefined ||
+      typeof expected !== 'object' ||
+      typeof expected.userId !== 'string' ||
+      expected.userId.trim().length === 0 ||
+      expected.userId !== expected.userId.trim() ||
+      typeof expected.organizationName !== 'string' ||
+      expected.organizationName.trim().length === 0 ||
+      expected.organizationName !== expected.organizationName.trim() ||
+      seenOwnerIds.has(expected.userId) ||
+      seenOrganizationNames.has(expected.organizationName)
+    ) {
+      cleanupFailures.push('org-discovery:invalid-expected-owner');
+      return {
+        organizationIds: [...discovered],
+        ownerOrgLinks,
+        hadErrors: true,
+        ownersWithNoMemberships: emptyNoMemberships,
+      };
+    }
+    seenOwnerIds.add(expected.userId);
+    seenOrganizationNames.add(expected.organizationName);
+    expectedNameByOwnerId.set(expected.userId, expected.organizationName);
+    expectedOrganizationNames.push(expected.organizationName);
+  }
+
+  const userIds = [...expectedNameByOwnerId.keys()];
+  if (userIds.length === 0) {
+    return {
+      organizationIds: [...discovered],
+      ownerOrgLinks,
+      hadErrors: false,
+      ownersWithNoMemberships: emptyNoMemberships,
+    };
+  }
+
+  let hadErrors = false;
+  let memberships: unknown[] | null = null;
+  let membershipPresentUserIds: Set<string> | null = null;
+
+  // Read memberships, but do not return early on failure: exact organization-name
+  // recovery is independent and can still identify an orphaned run-created org.
+  try {
+    const response = await admin
+      .from('organization_members')
+      .select('organization_id, user_id, role, status')
+      .in('user_id', userIds);
+    if (response.error) {
+      cleanupFailures.push(`org-discovery:${response.error.code || 'error'}`);
+      hadErrors = true;
+    } else if (!Array.isArray(response.data)) {
+      cleanupFailures.push('org-discovery:ambiguous-response');
+      hadErrors = true;
+    } else {
+      const classified = classifyMembershipListRows(userIds, response.data);
+      if (classified === null) {
+        cleanupFailures.push('org-discovery:ambiguous-membership-rows');
+        hadErrors = true;
+      } else {
+        memberships = response.data;
+        membershipPresentUserIds = classified.presentUserIds;
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    cleanupFailures.push(`org-discovery:exception:${message.slice(0, 80)}`);
+    hadErrors = true;
+  }
+
+  // Query only exact, unpredictable names generated for this run. This catches
+  // organizations whose create RPC committed but whose owner-membership row is
+  // no longer visible. A name match permits cleanup of that exact disposable org,
+  // but does NOT prove its owner link; the user remains unresolved unless a
+  // matching active owner membership independently confirms the relationship.
+  let organizationsByName: Array<{ id: string; name: string }> | null = null;
+  try {
+    const response = await admin
+      .from('organizations')
+      .select('id, name')
+      .in('name', expectedOrganizationNames);
+    if (response.error) {
+      cleanupFailures.push(`org-name-discovery:${response.error.code || 'error'}`);
+      hadErrors = true;
+    } else if (!Array.isArray(response.data)) {
+      cleanupFailures.push('org-name-discovery:ambiguous-response');
+      hadErrors = true;
+    } else {
+      const byName = new Map<string, string>();
+      const seenIds = new Set<string>();
+      let invalidRows = false;
+      for (const organization of response.data) {
+        if (
+          organization === null ||
+          typeof organization !== 'object' ||
+          Array.isArray(organization)
+        ) {
+          invalidRows = true;
+          break;
+        }
+        const row = organization as Record<string, unknown>;
+        const id = row.id;
+        const name = row.name;
+        if (
+          typeof id !== 'string' ||
+          id.length === 0 ||
+          typeof name !== 'string' ||
+          !seenOrganizationNames.has(name) ||
+          byName.has(name) ||
+          seenIds.has(id)
+        ) {
+          // A malformed, unexpected, or duplicate result is ambiguous. Do not
+          // choose one candidate or delete any of the rows by approximation.
+          invalidRows = true;
+          break;
+        }
+        byName.set(name, id);
+        seenIds.add(id);
+      }
+
+      if (invalidRows) {
+        cleanupFailures.push('org-name-discovery:invalid-or-duplicate-row');
+        hadErrors = true;
+      } else {
+        organizationsByName = response.data as Array<{ id: string; name: string }>;
+        for (const organization of organizationsByName) {
+          byName.set(organization.name, organization.id);
+          discovered.add(organization.id);
+        }
+
+        // Only a matching active owner membership for this owner's exact name
+        // creates an owner→org link. Any mismatch leaves the owner unresolved.
+        if (memberships !== null && membershipPresentUserIds !== null) {
+          for (const membership of memberships) {
+            const row = membership as Record<string, unknown>;
+            const ownerId = row.user_id as string;
+            const expectedName = expectedNameByOwnerId.get(ownerId);
+            if (!expectedName || row.role !== 'owner' || row.status !== 'active') continue;
+            if (
+              typeof row.organization_id !== 'string' ||
+              row.organization_id.length === 0
+            ) continue;
+            const exactOrganizationId = byName.get(expectedName);
+            if (exactOrganizationId !== row.organization_id) continue;
+
+            const existing = ownerOrgLinks.get(ownerId) ?? [];
+            if (!existing.includes(exactOrganizationId)) existing.push(exactOrganizationId);
+            ownerOrgLinks.set(ownerId, existing);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    cleanupFailures.push(`org-name-discovery:exception:${message.slice(0, 80)}`);
+    hadErrors = true;
+  }
+
+  let ownersWithNoMemberships = emptyNoMemberships;
+  // A zero-membership result clears unresolved only if the exact run-specific
+  // organization name is also absent. If the named org exists but its owner link
+  // is missing/mismatched, preserve unresolved so Auth deleteUser stays blocked.
+  if (!hadErrors && memberships !== null && membershipPresentUserIds !== null) {
+    ownersWithNoMemberships = ownersWithZeroMembershipRows(userIds, membershipPresentUserIds);
+    if (organizationsByName !== null) {
+      const foundNames = new Set(organizationsByName.map((organization) => organization.name));
+      for (const expected of expectedOwners) {
+        if (foundNames.has(expected.organizationName)) {
+          ownersWithNoMemberships.delete(expected.userId);
+        }
+      }
+    }
+  }
+
+  return {
+    organizationIds: [...discovered],
+    ownerOrgLinks,
+    hadErrors,
+    ownersWithNoMemberships,
+  };
+}
+
+const BUSINESS_CLEANUP_TABLES = ['follow_ups', 'needs', 'properties', 'clients', 'activities'] as const;
+export type BusinessCleanupTable = (typeof BUSINESS_CLEANUP_TABLES)[number];
+
+/**
+ * Fail-closed business-data residual applied before Auth owner deletion.
+ * present, error, ambiguous, and thrown reads add that org id to residualOrgIds
+ * and record a cleanup failure. Only a valid absent classification leaves the
+ * org out of the residual set for that table. Does not invent owner links.
+ */
+export async function accumulateBusinessTableResiduals(args: {
+  organizationIds: readonly string[];
+  labelForOrg: (orgId: string) => string;
+  residualOrgIds: Set<string>;
+  cleanupFailures: string[];
+  readTable: (
+    orgId: string,
+    table: BusinessCleanupTable,
+  ) => Promise<{ data: unknown; error: { code?: string; message?: string } | null }>;
+}): Promise<void> {
+  for (const orgId of args.organizationIds) {
+    const label = args.labelForOrg(orgId);
+    for (const table of BUSINESS_CLEANUP_TABLES) {
+      try {
+        const rowChk = await args.readTable(orgId, table);
+        const rowOutcome = classifyListRead(rowChk.data, rowChk.error);
+        if (rowOutcome === 'absent') continue;
+        args.residualOrgIds.add(orgId);
+        if (rowOutcome === 'error') {
+          args.cleanupFailures.push(`${label}-${table}-read:${rowChk.error?.code || 'error'}`);
+        } else if (rowOutcome === 'ambiguous') {
+          args.cleanupFailures.push(`${label}-${table}-read-ambiguous`);
+        } else {
+          args.cleanupFailures.push(`${label}-${table}-remain`);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        args.cleanupFailures.push(`${label}-${table}-read:exception:${msg.slice(0, 80)}`);
+        args.residualOrgIds.add(orgId);
+      }
+    }
+  }
+}
+
+/** CLEANUP PASS is allowed only when no cleanup failure was recorded. */
+export function cleanupStatusFromFailures(cleanupFailures: readonly string[]): 'PASS' | 'FAIL' {
+  return cleanupFailures.length === 0 ? 'PASS' : 'FAIL';
+}
+
+/** Runner fails when any check failed or cleanupFailures is non-empty. */
+export function runnerShouldExitNonZero(
+  results: readonly { status: string }[],
+  cleanupFailures: readonly string[],
+): boolean {
+  const failed = results.filter((result) => result.status === 'FAIL').length;
+  return failed > 0 || cleanupFailures.length > 0;
+}
+
+/**
+ * Production Auth-user cleanup path used by runAdapterSmoke finally.
+ * Dependencies are injectable so contract tests can spy deleteUser / membership reads
+ * without touching Staging.
+ */
+export async function deleteDisposableUsersWithOwnerGate(args: {
+  cleanupUserIds: readonly string[];
+  ownerOrgByUserId: ReadonlyMap<string, readonly string[]>;
+  unresolvedOwnerUserIds: ReadonlySet<string>;
+  residualOrgIds: ReadonlySet<string>;
+  cleanupFailures: string[];
+  listMembershipsByUserId: (uid: string) => Promise<{
+    data: unknown;
+    error: { code?: string; message?: string } | null;
+  }>;
+  deleteUser: (uid: string) => Promise<{ error: { message?: string } | null }>;
+}): Promise<{ deletedUserIds: string[]; skippedUserIds: Map<string, string> }> {
+  const deletedUserIds: string[] = [];
+  const skippedUserIds = new Map<string, string>();
+
+  for (const uid of args.cleanupUserIds) {
+    const relatedOrgs = [...(args.ownerOrgByUserId.get(uid) ?? [])];
+    let membershipOutcome: CleanupReadOutcome = 'absent';
+    let membershipErrorCode: string | undefined;
+
+    try {
+      const memByUser = await args.listMembershipsByUserId(uid);
+      membershipOutcome = classifyListRead(memByUser.data, memByUser.error);
+      if (memByUser.error) membershipErrorCode = memByUser.error.code || 'error';
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      membershipOutcome = 'error';
+      membershipErrorCode = `exception:${msg.slice(0, 80)}`;
+    }
+
+    const skipReason = shouldSkipDisposableUserDelete({
+      relatedOrgIds: relatedOrgs,
+      residualOrgIds: args.residualOrgIds,
+      membershipOutcome,
+      membershipErrorCode,
+      ownerUnresolved: args.unresolvedOwnerUserIds.has(uid),
+    });
+
+    if (skipReason) {
+      skippedUserIds.set(uid, skipReason);
+      args.cleanupFailures.push(`user-skip:${uid.slice(0, 8)}:${skipReason}`);
+      continue;
+    }
+
+    try {
+      const del = await args.deleteUser(uid);
+      if (del.error) {
+        args.cleanupFailures.push(`user-del:${uid.slice(0, 8)}:${del.error.message || 'error'}`);
+      } else {
+        deletedUserIds.push(uid);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      args.cleanupFailures.push(`user-ex:${uid.slice(0, 8)}:${msg.slice(0, 80)}`);
+    }
+  }
+
+  return { deletedUserIds, skippedUserIds };
+}
+
 export async function runAdapterSmoke() {
   const { url, anonKey, serviceKey } = loadConfig();
-  const runId = randomBytes(4).toString('hex');
+  const runId = randomBytes(16).toString('hex');
   const admin = adminClient(url, serviceKey);
   const cleanupFailures: string[] = [];
   const userIds: string[] = [];
+  // Track requests until a user id is confirmed; a lost response leaves the email
+  // here so cleanup can recover any user created remotely.
+  const uncertainCreateEmails = new Set<string>();
+  // Only recover organizations whose exact run-specific name and active owner
+  // membership match one of the disposable owner accounts created for this run.
+  const expectedOrganizationOwners: Array<{ userId: string; organizationName: string }> = [];
+  /** Confirmed owner userId → organization ids owned in this run. */
+  const ownerOrgByUserId = new Map<string, string[]>();
+  /** Owners whose organization link is not proven absent; blocks Auth delete. */
+  const unresolvedOwnerUserIds = new Set<string>();
   let orgAId: string | null = null;
   let orgBId: string | null = null;
 
@@ -351,13 +836,21 @@ export async function runAdapterSmoke() {
   console.log(`Cleanup reference run_id=${runId}`);
 
   try {
+    uncertainCreateEmails.add(emails.ownerA);
     const idOwnerA = await createDisposable(admin, emails.ownerA, runId, 'ownerA');
+    uncertainCreateEmails.delete(emails.ownerA);
     userIds.push(idOwnerA);
+    uncertainCreateEmails.add(emails.adminA);
     const idAdminA = await createDisposable(admin, emails.adminA, runId, 'adminA');
+    uncertainCreateEmails.delete(emails.adminA);
     userIds.push(idAdminA);
+    uncertainCreateEmails.add(emails.agentA);
     const idAgentA = await createDisposable(admin, emails.agentA, runId, 'agentA');
+    uncertainCreateEmails.delete(emails.agentA);
     userIds.push(idAgentA);
+    uncertainCreateEmails.add(emails.ownerB);
     const idOwnerB = await createDisposable(admin, emails.ownerB, runId, 'ownerB');
+    uncertainCreateEmails.delete(emails.ownerB);
     userIds.push(idOwnerB);
 
     const clientOwnerA = await sessionFor(url, anonKey, admin, emails.ownerA, idOwnerA);
@@ -366,19 +859,33 @@ export async function runAdapterSmoke() {
     const clientOwnerB = await sessionFor(url, anonKey, admin, emails.ownerB, idOwnerB);
     record('SETUP-SESSION', 'PASS', 'four disposable JWT sessions verified via getUser()');
 
+    const organizationNameA = `Adapter Smoke OrgA ${runId}`;
+    const organizationNameB = `Adapter Smoke OrgB ${runId}`;
+    expectedOrganizationOwners.push(
+      { userId: idOwnerA, organizationName: organizationNameA },
+      { userId: idOwnerB, organizationName: organizationNameB },
+    );
+    // Until create RPC returns a confirmed organization_id, treat owners as unresolved.
+    unresolvedOwnerUserIds.add(idOwnerA);
+    unresolvedOwnerUserIds.add(idOwnerB);
+
     const createdA = await clientOwnerA.rpc('create_organization_with_owner', {
-      p_name: `Adapter Smoke OrgA ${runId}`,
+      p_name: organizationNameA,
     });
-    const rowA = Array.isArray(createdA.data) ? createdA.data[0] : createdA.data;
-    if (createdA.error || !rowA?.organization_id) throw new Error('owner A organization create failed');
-    orgAId = rowA.organization_id as string;
+    const organizationIdA = extractOrganizationIdFromRpc(createdA.data, createdA.error);
+    if (!organizationIdA) throw new Error('owner A organization create failed: invalid organization_id');
+    orgAId = organizationIdA;
+    ownerOrgByUserId.set(idOwnerA, [orgAId]);
+    unresolvedOwnerUserIds.delete(idOwnerA);
 
     const createdB = await clientOwnerB.rpc('create_organization_with_owner', {
-      p_name: `Adapter Smoke OrgB ${runId}`,
+      p_name: organizationNameB,
     });
-    const rowB = Array.isArray(createdB.data) ? createdB.data[0] : createdB.data;
-    if (createdB.error || !rowB?.organization_id) throw new Error('owner B organization create failed');
-    orgBId = rowB.organization_id as string;
+    const organizationIdB = extractOrganizationIdFromRpc(createdB.data, createdB.error);
+    if (!organizationIdB) throw new Error('owner B organization create failed: invalid organization_id');
+    orgBId = organizationIdB;
+    ownerOrgByUserId.set(idOwnerB, [orgBId]);
+    unresolvedOwnerUserIds.delete(idOwnerB);
     record('SETUP-ORG', 'PASS', 'two independent orgs via create_organization_with_owner');
 
     const memAdmin = await admin
@@ -911,10 +1418,57 @@ export async function runAdapterSmoke() {
   } catch (e) {
     record('RUNNER-ERROR', 'FAIL', e instanceof Error ? e.message : String(e));
   } finally {
+    // Recover resources whose create requests may have committed despite lost responses.
+    let cleanupUserIds = [...userIds];
+    try {
+      cleanupUserIds = await discoverDisposableUserIds(
+        admin,
+        uncertainCreateEmails,
+        runId,
+        userIds,
+        cleanupFailures,
+      );
+    } catch {
+      cleanupFailures.push('user-discovery:unexpected');
+    }
+
+    const knownOrganizationIds = [orgAId, orgBId].filter((id): id is string => id !== null);
+    let cleanupOrganizationIds = knownOrganizationIds;
+    try {
+      const discovery = await discoverOrganizationIds(
+        admin,
+        expectedOrganizationOwners,
+        knownOrganizationIds,
+        cleanupFailures,
+      );
+      cleanupOrganizationIds = discovery.organizationIds;
+      // Apply only exact recovered owner→org links; never invent ownership.
+      for (const [ownerId, orgIds] of discovery.ownerOrgLinks) {
+        const merged = [...(ownerOrgByUserId.get(ownerId) ?? [])];
+        for (const orgId of orgIds) {
+          if (!merged.includes(orgId)) merged.push(orgId);
+        }
+        ownerOrgByUserId.set(ownerId, merged);
+      }
+      // Per-user unresolved resolution (production helper). Residual org
+      // protection and residualOrgIds remain unchanged downstream.
+      resolveUnresolvedOwnersAfterDiscovery({
+        expectedOwnerUserIds: expectedOrganizationOwners.map((e) => e.userId),
+        ownerOrgByUserId,
+        unresolvedOwnerUserIds,
+        hadErrors: discovery.hadErrors,
+        ownersWithNoMemberships: discovery.ownersWithNoMemberships,
+      });
+    } catch {
+      cleanupFailures.push('org-discovery:unexpected');
+      for (const exp of expectedOrganizationOwners) {
+        unresolvedOwnerUserIds.add(exp.userId);
+      }
+    }
+
     // Cleanup: each request is independently guarded; failures accumulate; continue other resources.
-    const bizTables = ['follow_ups', 'needs', 'properties', 'clients', 'activities'] as const;
-    for (const orgId of [orgAId, orgBId]) {
-      if (!orgId) continue;
+    const bizTables = BUSINESS_CLEANUP_TABLES;
+    for (const orgId of cleanupOrganizationIds) {
       for (const table of bizTables) {
         await checkedDelete(admin, table, 'organization_id', orgId, cleanupFailures, `biz:${table}`);
       }
@@ -939,29 +1493,28 @@ export async function runAdapterSmoke() {
       }
     }
 
-    for (const uid of userIds) {
-      try {
-        const del = await admin.auth.admin.deleteUser(uid);
-        if (del.error) cleanupFailures.push(`user-del:${uid.slice(0, 8)}:${del.error.message || 'error'}`);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        cleanupFailures.push(`user-ex:${uid.slice(0, 8)}:${msg.slice(0, 80)}`);
-      }
-    }
-
-    // Read-back: orgs gone, members gone, business rows gone, users gone
-    for (const [label, orgId] of [
-      ['orgA', orgAId],
-      ['orgB', orgBId],
-    ] as const) {
-      if (!orgId) continue;
+    // Read-back orgs + memberships BEFORE any Auth user delete (fail-closed residual set).
+    const residualOrgIds = new Set<string>();
+    for (const orgId of cleanupOrganizationIds) {
+      const label =
+        orgId === orgAId ? 'orgA' : orgId === orgBId ? 'orgB' : `recovered-org-${orgId.slice(0, 8)}`;
       try {
         const orgChk = await admin.from('organizations').select('id').eq('id', orgId).maybeSingle();
-        if (orgChk.error) cleanupFailures.push(`${label}-org-read:${orgChk.error.code || 'error'}`);
-        if (orgChk.data?.id) cleanupFailures.push(`${label}-still-present`);
+        const orgOutcome = classifyMaybeSingleRead(orgChk.data, orgChk.error);
+        if (orgOutcome === 'error') {
+          cleanupFailures.push(`${label}-org-read:${orgChk.error?.code || 'error'}`);
+          residualOrgIds.add(orgId);
+        } else if (orgOutcome === 'present') {
+          cleanupFailures.push(`${label}-still-present`);
+          residualOrgIds.add(orgId);
+        } else if (orgOutcome === 'ambiguous') {
+          cleanupFailures.push(`${label}-org-read-ambiguous`);
+          residualOrgIds.add(orgId);
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         cleanupFailures.push(`${label}-org-read:exception:${msg.slice(0, 80)}`);
+        residualOrgIds.add(orgId);
       }
 
       try {
@@ -969,45 +1522,69 @@ export async function runAdapterSmoke() {
           .from('organization_members')
           .select('id')
           .eq('organization_id', orgId);
-        if (memChk.error) {
-          cleanupFailures.push(`${label}-mem-read:${memChk.error.code || 'error'}`);
-        } else if (memChk.data === null) {
+        const memOutcome = classifyListRead(memChk.data, memChk.error);
+        if (memOutcome === 'error') {
+          cleanupFailures.push(`${label}-mem-read:${memChk.error?.code || 'error'}`);
+          residualOrgIds.add(orgId);
+        } else if (memOutcome === 'ambiguous') {
           cleanupFailures.push(`${label}-mem-read-ambiguous`);
-        } else if (memChk.data.length > 0) {
+          residualOrgIds.add(orgId);
+        } else if (memOutcome === 'present') {
           cleanupFailures.push(`${label}-members-remain`);
+          residualOrgIds.add(orgId);
         }
-        // empty array without error: success
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         cleanupFailures.push(`${label}-mem-read:exception:${msg.slice(0, 80)}`);
+        residualOrgIds.add(orgId);
       }
 
-      for (const table of bizTables) {
-        try {
+      await accumulateBusinessTableResiduals({
+        organizationIds: [orgId],
+        labelForOrg: () => label,
+        residualOrgIds,
+        cleanupFailures,
+        readTable: async (tableOrgId, table) => {
           const rowChk = await admin
             .from(table)
             .select('id')
-            .eq('organization_id', orgId)
+            .eq('organization_id', tableOrgId)
             .limit(1);
-          if (rowChk.error) {
-            cleanupFailures.push(`${label}-${table}-read:${rowChk.error.code || 'error'}`);
-          } else if (rowChk.data === null) {
-            cleanupFailures.push(`${label}-${table}-read-ambiguous`);
-          } else if (rowChk.data.length > 0) {
-            cleanupFailures.push(`${label}-${table}-remain`);
-          }
-          // empty array without error: success
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          cleanupFailures.push(`${label}-${table}-read:exception:${msg.slice(0, 80)}`);
-        }
-      }
+          return { data: rowChk.data, error: rowChk.error };
+        },
+      });
     }
 
-    for (const uid of userIds) {
+    // Per-user membership check + owner-protection gate via injectable production path.
+    const { skippedUserIds } = await deleteDisposableUsersWithOwnerGate({
+      cleanupUserIds,
+      ownerOrgByUserId,
+      unresolvedOwnerUserIds,
+      residualOrgIds,
+      cleanupFailures,
+      listMembershipsByUserId: async (uid) => {
+        const memByUser = await admin
+          .from('organization_members')
+          .select('id')
+          .eq('user_id', uid);
+        return { data: memByUser.data, error: memByUser.error };
+      },
+      deleteUser: async (uid) => {
+        const del = await admin.auth.admin.deleteUser(uid);
+        return { error: del.error };
+      },
+    });
+
+    // User read-back: only attempted deletes must be absent; retained owners stay present.
+    for (const uid of cleanupUserIds) {
+      const skipReason = skippedUserIds.get(uid);
       try {
         const u = await admin.auth.admin.getUserById(uid);
         if (u.data?.user?.id) {
+          if (skipReason) {
+            // Intentionally retained — not a false success path; skip already recorded.
+            continue;
+          }
           cleanupFailures.push(`user-still:${uid.slice(0, 8)}`);
           continue;
         }
@@ -1020,23 +1597,29 @@ export async function runAdapterSmoke() {
             code === 'user_not_found' ||
             code === 'not_found' ||
             msg.includes('user not found');
+          if (skipReason) {
+            // Gate blocked delete but user is already gone — acceptable; no extra failure.
+            continue;
+          }
           if (!definitiveAbsent) {
             cleanupFailures.push(
               `user-verify:${uid.slice(0, 8)}:${u.error.code || u.error.message || 'error'}`,
             );
           }
-          // Only HTTP 404 / user_not_found / not_found / explicit "user not found" count as absent.
           continue;
         }
+        if (skipReason) continue;
         // No error but no user id: ambiguous response — must FAIL cleanup.
         cleanupFailures.push(`user-verify-ambiguous:${uid.slice(0, 8)}`);
       } catch (e) {
+        if (skipReason) continue;
         const msg = e instanceof Error ? e.message : String(e);
         cleanupFailures.push(`user-verify-ex:${uid.slice(0, 8)}:${msg.slice(0, 80)}`);
       }
     }
 
-    if (cleanupFailures.length === 0) {
+    const cleanupStatus = cleanupStatusFromFailures(cleanupFailures);
+    if (cleanupStatus === 'PASS') {
       record('CLEANUP', 'PASS', `run_id=${runId} orgs+members+users verified absent`);
     } else {
       record(
@@ -1051,7 +1634,7 @@ export async function runAdapterSmoke() {
   const failed = results.filter((r) => r.status === 'FAIL').length;
   const skipped = results.filter((r) => r.status === 'SKIP').length;
   console.log(`\nSUMMARY passed=${passed} failed=${failed} skipped=${skipped} run_id=${runId}`);
-  if (failed > 0 || cleanupFailures.length > 0) {
+  if (runnerShouldExitNonZero(results, cleanupFailures)) {
     process.exit(1);
   }
 }

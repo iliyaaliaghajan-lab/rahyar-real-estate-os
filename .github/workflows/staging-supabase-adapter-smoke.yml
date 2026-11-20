@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: etehad-staging-supabase-adapter-smoke
+  cancel-in-progress: false
+
 jobs:
   adapter-smoke:
     name: Supabase adapter JWT smoke (Staging)
